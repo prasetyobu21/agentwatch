@@ -16,7 +16,7 @@ struct AgentWatchApp: App {
                 
                 Divider()
                 
-                let activeSessions = Array(appDelegate.daemonClient.sessions.values).filter { $0.status == "Running" || $0.status == "Initializing" || $0.status == "Waiting" }
+                let activeSessions = Array(appDelegate.daemonClient.sessions.values).filter { !["idle", "completed", "failed", "orphaned"].contains($0.state) }
                 if activeSessions.isEmpty {
                     Text("No active agents (Idle)")
                         .foregroundColor(.gray)
@@ -37,12 +37,12 @@ struct AgentWatchApp: App {
                                 }
                                 Spacer()
                                 
-                                Text(session.status)
+                                Text(session.state.replacingOccurrences(of: "_", with: " ").capitalized)
                                     .font(.system(size: 10, weight: .bold))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(statusColor(session.status).opacity(0.15))
-                                    .foregroundColor(statusColor(session.status))
+                                    .background(statusColor(session.state).opacity(0.15))
+                                    .foregroundColor(statusColor(session.state))
                                     .cornerRadius(4)
                             }
                         }
@@ -85,13 +85,15 @@ struct AgentWatchApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    func statusColor(_ status: String) -> Color {
-        switch status {
-        case "Initializing": return .blue
-        case "Running": return .green
-        case "Waiting": return .yellow
-        case "Finished": return .gray
-        case "Error": return .red
+    func statusColor(_ state: String) -> Color {
+        switch state {
+        case "starting": return .blue
+        case "running", "executing_tool": return .white
+        case "permission_required", "permission_resolving": return .orange
+        case "input_required": return .yellow
+        case "completed": return .green
+        case "failed": return .red
+        case "orphaned": return .gray
         default: return .primary
         }
     }
@@ -222,7 +224,27 @@ struct NotchView: View {
     @State private var doneTimer: Timer? = nil
     
     var activeCount: Int {
-        daemonClient.sessions.values.filter { $0.status == "Running" || $0.status == "Initializing" }.count
+        daemonClient.sessions.values.filter {
+            ["starting", "running", "executing_tool", "permission_resolving", "permission_required", "input_required"].contains($0.state)
+        }.count
+    }
+
+    var permissionCount: Int {
+        daemonClient.sessions.values.filter { $0.state == "permission_required" }.count
+    }
+
+    var inputCount: Int {
+        daemonClient.sessions.values.filter { $0.state == "input_required" }.count
+    }
+
+    var attentionText: String? {
+        if permissionCount > 0 {
+            return "Asking for permission (\(permissionCount))"
+        }
+        if inputCount > 0 {
+            return "Asking for input (\(inputCount))"
+        }
+        return nil
     }
     
     var isExpanded: Bool {
@@ -230,7 +252,9 @@ struct NotchView: View {
     }
     
     var earWidth: CGFloat {
-        if showingDone {
+        if attentionText != nil {
+            return 170
+        } else if showingDone {
             return 130
         } else if activeCount > 0 {
             return 60
@@ -272,7 +296,15 @@ struct NotchView: View {
                     HStack {
                         Spacer(minLength: 0)
                         if isExpanded {
-                            if showingDone {
+                            if let attentionText {
+                                Text(attentionText)
+                                    .font(.system(size: 14, weight: .semibold, design: .default))
+                                    .foregroundColor(permissionCount > 0 ? .yellow : .orange)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.trailing, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            } else if showingDone {
                                 Text("\(doneCount) progress done")
                                     .font(.system(size: 14, weight: .semibold, design: .default))
                                     .foregroundColor(.green)
@@ -309,11 +341,17 @@ struct NotchView: View {
             var completedCount = 0
             for (id, session) in newSessions {
                 if let oldSession = previousSessions[id] {
-                    let wasRunning = oldSession.status == "Running"
-                    // Interactive agents such as Codex remain alive after a
-                    // turn, so Waiting is the completion signal for the turn.
-                    let isDone = (session.status == "Waiting" || session.status == "Finished" || session.status == "Error")
-                    if wasRunning && isDone {
+                    let wasWorking = ["starting", "running", "executing_tool", "permission_resolving"].contains(oldSession.state)
+                    // Permission/input states are attention requests, never a
+                    // completion. Interactive agents report a completed turn
+                    // through their normal idle prompt.
+                    // Older wrappers only report an ambiguous Waiting state.
+                    // The daemon maps it to idle, but it must not produce a
+                    // false completion animation. New screen-classified idle
+                    // states still represent a completed interactive turn.
+                    let isDone = session.state == "completed" ||
+                        (session.state == "idle" && session.source != "legacy-event")
+                    if wasWorking && isDone {
                         completedCount += 1
                     }
                 }

@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/agentwatch/agentwatch/internal/ipc"
+	"github.com/agentwatch/agentwatch/internal/terminal"
+)
 
 func TestCodexIdleDetection(t *testing.T) {
 	tests := []struct {
@@ -21,6 +26,27 @@ func TestCodexIdleDetection(t *testing.T) {
 			pw := &ParserWriter{AgentName: "codex", outputBuffer: []byte(test.output)}
 			if got := pw.isCurrentlyIdleLocked(); got != test.idle {
 				t.Fatalf("isCurrentlyIdleLocked() = %v, want %v", got, test.idle)
+			}
+		})
+	}
+}
+
+func TestClassifierDistinguishesPermissionAndInput(t *testing.T) {
+	tests := []struct {
+		name, output string
+		want         ipc.AgentState
+	}{
+		{"permission", "Do you want to proceed?\nAllow once\nDeny", ipc.StatePermissionRequired},
+		{"question", "Which environment should I use?", ipc.StateInputRequired},
+		{"tool", "Executing rg --files", ipc.StateExecutingTool},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := terminal.New(100, 10)
+			_ = m.Write([]byte(test.output))
+			pw := &ParserWriter{AgentName: "codex", terminal: m, outputBuffer: []byte(test.output)}
+			if got := pw.classifyLocked(); got != test.want {
+				t.Fatalf("classifyLocked() = %q, want %q", got, test.want)
 			}
 		})
 	}
