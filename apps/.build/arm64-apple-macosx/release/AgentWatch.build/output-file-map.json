@@ -1,0 +1,19 @@
+{
+  "": {
+    "dependencies": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/AgentWatch.d",
+    "object": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/AgentWatch.o",
+    "swift-dependencies": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/master.swiftdeps"
+  },
+  "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/Sources/AgentWatch/App.swift": {
+    "object": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/App.swift.o",
+    "swiftmodule": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/App.swiftdeps",
+    "diagnostics": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/App.dia"
+  },
+  "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/Sources/AgentWatch/DaemonClient.swift": {
+    "object": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/DaemonClient.swift.o",
+    "swiftmodule": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/DaemonClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/DaemonClient.swiftdeps",
+    "diagnostics": "/Users/mbam2256gb/Documents/Coding/agentwatch/apps/.build/arm64-apple-macosx/release/AgentWatch.build/DaemonClient.dia"
+  }
+}
