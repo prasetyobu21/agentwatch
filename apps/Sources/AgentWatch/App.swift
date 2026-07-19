@@ -237,26 +237,27 @@ struct NotchView: View {
 
 struct ProgressIcon: View {
     var status: String
-    @State private var rotation: Double = 0
+    
+    // Braille spinner frames matching agy's animation
+    private let frames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+    @State private var frameIndex = 0
+    @State private var timer: Timer? = nil
     
     var body: some View {
         ZStack {
             if status == "Running" || status == "Initializing" {
-                Circle()
-                    .stroke(
-                        AngularGradient(gradient: Gradient(colors: [.white.opacity(0.2), .white]), center: .center),
-                        lineWidth: 2
-                    )
-                    .rotationEffect(.degrees(rotation))
+                Text(frames[frameIndex])
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .foregroundColor(status == "Initializing" ? .blue : .white)
                     .onAppear {
-                        withAnimation(Animation.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                            rotation = 360
-                        }
+                        startTimer()
                     }
-                
-                Circle()
-                    .stroke(status == "Initializing" ? Color.blue : Color.white, lineWidth: 2)
-                    .frame(width: 10, height: 10)
+                    .onDisappear {
+                        stopTimer()
+                    }
+                    .onChange(of: status) { _ in
+                        startTimer()
+                    }
             } else if status == "Waiting" {
                 Image(systemName: "hand.raised.fill")
                     .foregroundColor(.yellow)
@@ -265,5 +266,20 @@ struct ProgressIcon: View {
                     .foregroundColor(.gray)
             }
         }
+    }
+    
+    private func startTimer() {
+        stopTimer()
+        guard status == "Running" || status == "Initializing" else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
+            DispatchQueue.main.async {
+                frameIndex = (frameIndex + 1) % frames.count
+            }
+        }
+    }
+    
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 }
