@@ -100,10 +100,12 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	// We allow a 2-second grace period after user typing.
 	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
 
-	// 1. Check for highly specific prompt indicators (like ❯ or User:)
+	// 1. Check for prompt indicators (like ❯, User:, >, $)
 	containsPatterns := []string{
 		"❯",
 		"User:",
+		">",
+		"$",
 	}
 
 	isPromptPresent := false

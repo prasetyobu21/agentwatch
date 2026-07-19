@@ -16,14 +16,15 @@ struct AgentWatchApp: App {
                 
                 Divider()
                 
-                if appDelegate.daemonClient.sessions.isEmpty {
+                let activeSessions = Array(appDelegate.daemonClient.sessions.values).filter { $0.status == "Running" || $0.status == "Initializing" || $0.status == "Waiting" }
+                if activeSessions.isEmpty {
                     Text("No active agents (Idle)")
                         .foregroundColor(.gray)
                         .font(.subheadline)
                         .padding(.vertical, 8)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(appDelegate.daemonClient.sessions.values), id: \.sessionID) { session in
+                        ForEach(activeSessions, id: \.sessionID) { session in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(session.agentName)
