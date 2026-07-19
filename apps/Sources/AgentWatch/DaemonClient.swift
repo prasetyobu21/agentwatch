@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-struct AgentSession: Codable, Identifiable {
+struct AgentSession: Codable, Identifiable, Equatable {
     var id: String { sessionID }
     let sessionID: String
     let agentName: String

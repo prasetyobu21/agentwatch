@@ -171,7 +171,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct NotchView: View {
     @ObservedObject var daemonClient: DaemonClient
     
-    @State private var maxActiveCount: Int = 0
+    @State private var previousSessions: [String: AgentSession] = [:]
     @State private var showingDone: Bool = false
     @State private var doneCount: Int = 0
     @State private var doneTimer: Timer? = nil
@@ -185,10 +185,10 @@ struct NotchView: View {
     }
     
     var earWidth: CGFloat {
-        if activeCount > 0 {
-            return 60
-        } else if showingDone {
+        if showingDone {
             return 130
+        } else if activeCount > 0 {
+            return 60
         } else {
             return 0
         }
@@ -227,9 +227,7 @@ struct NotchView: View {
                     HStack {
                         Spacer(minLength: 0)
                         if isExpanded {
-                            if activeCount > 0 {
-                                // Only show spinner loading during active progress; right ear remains empty.
-                            } else if showingDone {
+                            if showingDone {
                                 Text("\(doneCount) progress done")
                                     .font(.system(size: 14, weight: .semibold, design: .default))
                                     .foregroundColor(.green)
@@ -260,32 +258,34 @@ struct NotchView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .onAppear {
-            if activeCount > 0 {
-                maxActiveCount = activeCount
-            }
+            previousSessions = daemonClient.sessions
         }
-        .onChange(of: activeCount) { newCount in
-            if newCount > 0 {
-                doneTimer?.invalidate()
-                doneTimer = nil
-                showingDone = false
-                if newCount > maxActiveCount {
-                    maxActiveCount = newCount
-                }
-            } else {
-                if maxActiveCount > 0 {
-                    doneCount = maxActiveCount
-                    showingDone = true
-                    maxActiveCount = 0
-                    
-                    doneTimer?.invalidate()
-                    doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
-                        DispatchQueue.main.async {
-                            self.showingDone = false
-                        }
+        .onChange(of: daemonClient.sessions) { newSessions in
+            var completedCount = 0
+            for (id, session) in newSessions {
+                if let oldSession = previousSessions[id] {
+                    let wasActive = (oldSession.status == "Running" || oldSession.status == "Initializing")
+                    let isDone = (session.status == "Finished" || session.status == "Error")
+                    if wasActive && isDone {
+                        completedCount += 1
                     }
                 }
             }
+            
+            if completedCount > 0 {
+                doneCount += completedCount
+                showingDone = true
+                
+                doneTimer?.invalidate()
+                doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                    DispatchQueue.main.async {
+                        self.showingDone = false
+                        self.doneCount = 0
+                    }
+                }
+            }
+            
+            previousSessions = newSessions
         }
     }
 }
