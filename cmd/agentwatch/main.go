@@ -131,15 +131,21 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		   strings.Contains(lowerLine, "generating...") || 
 		   strings.Contains(lowerLine, "booping") || 
 		   strings.Contains(lowerLine, "thinking...") ||
-		   strings.Contains(lowerLine, "working...") ||
-		   strings.Contains(line, "✻") {
+		   strings.Contains(lowerLine, "working...") {
 			return false
 		}
 		
-		// Check for Braille spinner characters in the line
-		brailleSpinners := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
-		for _, spinner := range brailleSpinners {
-			if strings.Contains(line, spinner) {
+		// Precise check for active spinners.
+		// Spinners can be single characters on a line or start a line followed by an ellipsis (e.g. "✢Noodling…")
+		spinners := map[string]bool{
+			"⣾": true, "⣽": true, "⣻": true, "⢿": true, "⡿": true, "⣟": true, "⣯": true, "⣷": true,
+			"✢": true, "✳": true, "✶": true, "✻": true, "·": true,
+		}
+		if spinners[line] {
+			return false
+		}
+		for s := range spinners {
+			if strings.HasPrefix(line, s) && (strings.HasSuffix(line, "…") || strings.HasSuffix(line, "...")) {
 				return false
 			}
 		}
