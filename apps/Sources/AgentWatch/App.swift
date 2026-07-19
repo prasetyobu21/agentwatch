@@ -279,7 +279,7 @@ struct NotchView: View {
                     maxActiveCount = 0
                     
                     doneTimer?.invalidate()
-                    doneTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                    doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
                         DispatchQueue.main.async {
                             self.showingDone = false
                         }
