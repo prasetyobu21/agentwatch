@@ -22,6 +22,7 @@ import (
 )
 
 func sendEvent(client *http.Client, event ipc.Event) {
+	event.PID = os.Getpid()
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("Failed to marshal event: %v", err)
@@ -277,7 +278,7 @@ func main() {
 
 	// Handle graceful shutdown
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		<-sig
 		sendEvent(client, ipc.Event{
