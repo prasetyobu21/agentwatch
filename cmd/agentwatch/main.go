@@ -49,10 +49,11 @@ type ParserWriter struct {
 	SessionID string
 	AgentName string
 
-	mu           sync.Mutex
-	lastStatus   ipc.AgentStatus
-	outputBuffer []byte
-	timer        *time.Timer
+	mu            sync.Mutex
+	lastStatus    ipc.AgentStatus
+	outputBuffer  []byte
+	timer         *time.Timer
+	lastInputTime time.Time
 }
 
 func (pw *ParserWriter) Write(p []byte) (n int, err error) {
@@ -64,13 +65,18 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 
 	// Append to buffer
 	pw.outputBuffer = append(pw.outputBuffer, p...)
-	// Keep buffer small (last 256 bytes is enough for prompt detection)
-	if len(pw.outputBuffer) > 256 {
-		pw.outputBuffer = pw.outputBuffer[len(pw.outputBuffer)-256:]
+	// Keep buffer small (last 4096 bytes is enough for prompt detection and autocomplete noise)
+	if len(pw.outputBuffer) > 4096 {
+		pw.outputBuffer = pw.outputBuffer[len(pw.outputBuffer)-4096:]
 	}
 
-	// Any output means it might be running
-	pw.setStatus(ipc.StatusRunning)
+	// Synchronously evaluate state on write instead of blindly setting Running.
+	// This prevents the echoed user typing at the prompt from resetting the state to Running.
+	if pw.isCurrentlyIdleLocked() {
+		pw.setStatus(ipc.StatusWaiting)
+	} else {
+		pw.setStatus(ipc.StatusRunning)
+	}
 
 	// Debounce timer for idle detection
 	if pw.timer != nil {
@@ -81,36 +87,79 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
+// Expects pw.mu to be held
+func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
+	outStr := string(pw.outputBuffer)
+	
+	// Strip ANSI escape codes (handles CSI, OSC, and standard 2-character escapes)
+	ansiRegex := regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]?[\x30-\x7e]`)
+	cleanStr := ansiRegex.ReplaceAllString(outStr, "")
+	cleanStr = strings.TrimSpace(cleanStr)
+
+	// Check if the user is currently typing and the prompt is present anywhere in the buffer.
+	// We allow a 2-second grace period after user typing.
+	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
+
+	// 1. Check for highly specific prompt indicators (like ❯ or User:)
+	containsPatterns := []string{
+		"❯",
+		"User:",
+	}
+
+	isPromptPresent := false
+	if isTypingGracePeriod {
+		// If user is typing, we check if the prompt is present ANYWHERE in the buffer
+		for _, pattern := range containsPatterns {
+			if strings.Contains(cleanStr, pattern) {
+				isPromptPresent = true
+				break
+			}
+		}
+	} else {
+		// If not in the typing grace period, the prompt must be on the last line
+		lines := strings.Split(cleanStr, "\n")
+		var lastLine string
+		if len(lines) > 0 {
+			lastLine = strings.TrimSpace(lines[len(lines)-1])
+		}
+		for _, pattern := range containsPatterns {
+			if strings.Contains(lastLine, pattern) {
+				isPromptPresent = true
+				break
+			}
+		}
+	}
+
+	if isPromptPresent {
+		return true
+	}
+
+	// 2. If the entire trimmed output ends with standard prompt/question suffixes
+	// (like >, ?, $, :, ))
+	suffixPatterns := []string{
+		">",
+		"?",
+		"$",
+		":",
+		")",
+	}
+	for _, pattern := range suffixPatterns {
+		if strings.HasSuffix(cleanStr, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (pw *ParserWriter) checkIdle() {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 
-	outStr := string(pw.outputBuffer)
-	
-	// Strip ANSI escape codes
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	cleanStr := ansiRegex.ReplaceAllString(outStr, "")
-	cleanStr = strings.TrimSpace(cleanStr)
-	
-	// Common agent prompts that indicate it is waiting for user input
-	idlePatterns := []string{
-		">",
-		"?",
-		"$",
-		"User:",
-		"❯",
-	}
-
-	isIdle := false
-	for _, pattern := range idlePatterns {
-		if strings.HasSuffix(cleanStr, pattern) {
-			isIdle = true
-			break
-		}
-	}
-
-	if isIdle {
+	if pw.isCurrentlyIdleLocked() {
 		pw.setStatus(ipc.StatusWaiting)
+	} else {
+		pw.setStatus(ipc.StatusRunning)
 	}
 }
 
@@ -194,11 +243,44 @@ func main() {
 		AgentName: agentName,
 	}
 	
-	// Set initial idle state
-	pw.setStatus(ipc.StatusWaiting)
+	// Set initial initializing state
+	pw.setStatus(ipc.StatusInitializing)
 
 	// Copy stdin to pty, and pty to parser
-	go io.Copy(ptmx, os.Stdin)
+	// Copy stdin to pty with input tracking. If user types non-Enter keys,
+	// we record the timestamp to enable a 2-second grace period where we look
+	// for the prompt anywhere in the output buffer. If they hit Enter, we cancel
+	// the grace period immediately to allow transition back to Running.
+	go func() {
+		buf := make([]byte, 128)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				break
+			}
+			if n > 0 {
+				pw.mu.Lock()
+				hasEnter := false
+				for i := 0; i < n; i++ {
+					if buf[i] == '\n' || buf[i] == '\r' {
+						hasEnter = true
+						break
+					}
+				}
+				if hasEnter {
+					pw.lastInputTime = time.Time{}
+				} else {
+					pw.lastInputTime = time.Now()
+				}
+				pw.mu.Unlock()
+
+				_, err = ptmx.Write(buf[:n])
+				if err != nil {
+					break
+				}
+			}
+		}
+	}()
 	io.Copy(pw, ptmx)
 
 	// Clean up when command finishes

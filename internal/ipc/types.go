@@ -3,11 +3,12 @@ package ipc
 type AgentStatus string
 
 const (
-	StatusRunning  AgentStatus = "Running"
-	StatusWaiting  AgentStatus = "Waiting"
-	StatusIdle     AgentStatus = "Idle"
-	StatusFinished AgentStatus = "Finished"
-	StatusError    AgentStatus = "Error"
+	StatusRunning      AgentStatus = "Running"
+	StatusInitializing AgentStatus = "Initializing"
+	StatusWaiting      AgentStatus = "Waiting"
+	StatusIdle         AgentStatus = "Idle"
+	StatusFinished     AgentStatus = "Finished"
+	StatusError        AgentStatus = "Error"
 )
 
 type Event struct {

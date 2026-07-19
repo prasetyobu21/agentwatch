@@ -72,6 +72,8 @@ class DaemonClient: ObservableObject {
             globalStatus = "Error"
         } else if allStatuses.contains("Running") {
             globalStatus = "Running"
+        } else if allStatuses.contains("Initializing") {
+            globalStatus = "Initializing"
         } else if allStatuses.contains("Waiting") {
             globalStatus = "Waiting"
         } else {

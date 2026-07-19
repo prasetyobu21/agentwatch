@@ -9,12 +9,51 @@ struct AgentWatchApp: App {
     @State private var testAgentCount: Int = 1
 
     var body: some Scene {
-        MenuBarExtra("AgentWatch", systemImage: appDelegate.daemonClient.globalStatus == "Running" ? "bolt.fill" : "eye") {
+        MenuBarExtra("AgentWatch", systemImage: (appDelegate.daemonClient.globalStatus == "Running" || appDelegate.daemonClient.globalStatus == "Initializing") ? "bolt.fill" : "eye") {
             VStack(spacing: 12) {
-                Text("Prototype Controls")
+                Text("Active Agents")
                     .font(.headline)
                 
                 Divider()
+                
+                if appDelegate.daemonClient.sessions.isEmpty {
+                    Text("No active agents (Idle)")
+                        .foregroundColor(.gray)
+                        .font(.subheadline)
+                        .padding(.vertical, 8)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(appDelegate.daemonClient.sessions.values), id: \.sessionID) { session in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(session.agentName)
+                                        .font(.system(size: 13, weight: .semibold))
+                                    if let msg = session.message, !msg.isEmpty {
+                                        Text(msg)
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                                Spacer()
+                                
+                                Text(session.status)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(statusColor(session.status).opacity(0.15))
+                                    .foregroundColor(statusColor(session.status))
+                                    .cornerRadius(4)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                
+                Divider()
+                
+                Text("Prototype Controls")
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
                 
                 VStack(alignment: .leading) {
                     Text("Duration: \(Int(testDuration)) seconds")
@@ -30,7 +69,7 @@ struct AgentWatchApp: App {
                 Button("Trigger Test") {
                     appDelegate.triggerTest(agents: testAgentCount, duration: Int(testDuration))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .padding(.top, 4)
                 
                 Divider()
@@ -40,9 +79,20 @@ struct AgentWatchApp: App {
                 }
             }
             .padding()
-            .frame(width: 250)
+            .frame(width: 280)
         }
         .menuBarExtraStyle(.window)
+    }
+
+    func statusColor(_ status: String) -> Color {
+        switch status {
+        case "Initializing": return .blue
+        case "Running": return .green
+        case "Waiting": return .yellow
+        case "Finished": return .gray
+        case "Error": return .red
+        default: return .primary
+        }
     }
 }
 
@@ -121,7 +171,7 @@ struct NotchView: View {
     @ObservedObject var daemonClient: DaemonClient
     
     var activeCount: Int {
-        daemonClient.sessions.values.filter { $0.status == "Running" }.count
+        daemonClient.sessions.values.filter { $0.status == "Running" || $0.status == "Initializing" }.count
     }
     
     var isExpanded: Bool {
@@ -190,7 +240,7 @@ struct ProgressIcon: View {
     
     var body: some View {
         ZStack {
-            if status == "Running" {
+            if status == "Running" || status == "Initializing" {
                 Circle()
                     .stroke(
                         AngularGradient(gradient: Gradient(colors: [.white.opacity(0.2), .white]), center: .center),
@@ -204,7 +254,7 @@ struct ProgressIcon: View {
                     }
                 
                 Circle()
-                    .stroke(Color.white, lineWidth: 2)
+                    .stroke(status == "Initializing" ? Color.blue : Color.white, lineWidth: 2)
                     .frame(width: 10, height: 10)
             } else if status == "Waiting" {
                 Image(systemName: "hand.raised.fill")
