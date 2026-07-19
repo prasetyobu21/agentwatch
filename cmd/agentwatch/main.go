@@ -106,54 +106,65 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		f.Close()
 	}
 
-	// 1. Check if the output contains active busy indicators.
-	// If any of these are present, the agent is definitely busy/generating/thinking.
-	lowerStr := strings.ToLower(cleanStr)
-	if strings.Contains(lowerStr, "esc to interrupt") || 
-	   strings.Contains(lowerStr, "esc to cancel") || 
-	   strings.Contains(lowerStr, "generating...") || 
-	   strings.Contains(lowerStr, "booping") || 
-	   strings.Contains(lowerStr, "thinking...") ||
-	   strings.Contains(lowerStr, "working...") ||
-	   strings.Contains(cleanStr, "✻") {
-		return false
+	// Replace carriage returns with newlines to normalize TUI line overwrites
+	normalizedStr := strings.ReplaceAll(cleanStr, "\r", "\n")
+	lines := strings.Split(normalizedStr, "\n")
+
+	// Get the last 5 non-empty lines of visual output
+	var lastLines []string
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			lastLines = append([]string{trimmed}, lastLines...)
+			if len(lastLines) >= 5 {
+				break
+			}
+		}
 	}
 
-	// Check for Braille spinner characters (indicating active TUI spinners)
-	brailleSpinners := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
-	for _, spinner := range brailleSpinners {
-		if strings.Contains(cleanStr, spinner) {
+	// 1. Check if the recent output contains active busy indicators.
+	// If any of these are present in the last 5 lines, the agent is definitely busy.
+	for _, line := range lastLines {
+		lowerLine := strings.ToLower(line)
+		if strings.Contains(lowerLine, "esc to interrupt") || 
+		   strings.Contains(lowerLine, "esc to cancel") || 
+		   strings.Contains(lowerLine, "generating...") || 
+		   strings.Contains(lowerLine, "booping") || 
+		   strings.Contains(lowerLine, "thinking...") ||
+		   strings.Contains(lowerLine, "working...") ||
+		   strings.Contains(line, "✻") {
 			return false
+		}
+		
+		// Check for Braille spinner characters in the line
+		brailleSpinners := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+		for _, spinner := range brailleSpinners {
+			if strings.Contains(line, spinner) {
+				return false
+			}
 		}
 	}
 
 	isPromptPresent := false
 	if isTypingGracePeriod {
-		// If user is typing, we check if the prompt is present ANYWHERE in the buffer
+		// If user is typing, we check if the prompt is present ANYWHERE in the normalized buffer
 		containsPatterns := []string{"❯", "User:", ">", "$"}
 		for _, pattern := range containsPatterns {
-			if strings.Contains(cleanStr, pattern) {
+			if strings.Contains(normalizedStr, pattern) {
 				isPromptPresent = true
 				break
 			}
 		}
 	} else {
-		// If not in the grace period, check if the prompt is in the last 3 lines of output.
-		// This handles TUIs that render a status bar or help text below the prompt.
-		lines := strings.Split(cleanStr, "\n")
-		checkLines := lines
-		if len(lines) > 3 {
-			checkLines = lines[len(lines)-3:]
-		}
-		for _, line := range checkLines {
-			trimmedLine := strings.TrimSpace(line)
+		// If not in the grace period, check if the prompt is in the last 5 visual lines.
+		for _, line := range lastLines {
 			// Check specific contains indicators anywhere on the line
-			if strings.Contains(trimmedLine, "❯") || strings.Contains(trimmedLine, "User:") {
+			if strings.Contains(line, "❯") || strings.Contains(line, "User:") {
 				isPromptPresent = true
 				break
 			}
 			// Check prefix indicators at the start of the line (e.g. > or $)
-			if strings.HasPrefix(trimmedLine, ">") || strings.HasPrefix(trimmedLine, "$") {
+			if strings.HasPrefix(line, ">") || strings.HasPrefix(line, "$") {
 				isPromptPresent = true
 				break
 			}
