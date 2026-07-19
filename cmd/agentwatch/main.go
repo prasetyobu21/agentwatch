@@ -122,6 +122,17 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		}
 	}
 
+	// First, check if the very last line of visual output displays an idle status bar indicator.
+	// If it does, the agent is definitely waiting/idle, overriding any older busy indicators in history.
+	if len(lastLines) > 0 {
+		lastLine := strings.ToLower(lastLines[len(lastLines)-1])
+		if strings.Contains(lastLine, "? for shortcuts") || 
+		   strings.Contains(lastLine, "← for agents") || 
+		   strings.Contains(lastLine, "ctrl-c again to exit") {
+			return true
+		}
+	}
+
 	// 1. Check if the recent output contains active busy indicators.
 	// If any of these are present in the last 5 lines, the agent is definitely busy.
 	for _, line := range lastLines {
