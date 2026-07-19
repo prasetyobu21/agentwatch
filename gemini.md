@@ -2,6 +2,7 @@
 
 ## Changelog
 <!-- Add new changelog entries here for the next batch of work -->
+- Configured the SwiftUI macOS app to automatically spawn and manage the background Go daemon (agentwatchd) as a child process. Added build_app_bundle.sh to package the app and daemon into a single self-contained AgentWatch.app with LSUIElement set in Info.plist to enable clean menu bar login items.
 - Redesigned the Notch progress indicator to only show the loading spinner during active progress (hiding "n in progress" text) and keep the width tight to only hold the spinner (60pt left, 60pt right). Upon completion of any session, it immediately displays a checkmark or spinner (depending on overall active count) and shows 'n progress done' on the right, incrementing the count if other processes complete during the 2-second display window before collapsing.
 - Normalized carriage returns (`\r` to `\n`) in the CLI wrapper output parser to properly split visual lines.
 - Restructured idle/busy detection to check the last 5 non-empty visual lines instead of scanning the entire scrolling buffer.
