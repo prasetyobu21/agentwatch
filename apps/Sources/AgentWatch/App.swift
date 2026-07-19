@@ -171,12 +171,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct NotchView: View {
     @ObservedObject var daemonClient: DaemonClient
     
+    @State private var maxActiveCount: Int = 0
+    @State private var showingDone: Bool = false
+    @State private var doneCount: Int = 0
+    @State private var doneTimer: Timer? = nil
+    
     var activeCount: Int {
         daemonClient.sessions.values.filter { $0.status == "Running" || $0.status == "Initializing" }.count
     }
     
     var isExpanded: Bool {
-        activeCount > 0
+        activeCount > 0 || showingDone
+    }
+    
+    var earWidth: CGFloat {
+        if activeCount > 0 {
+            return 60
+        } else if showingDone {
+            return 130
+        } else {
+            return 0
+        }
     }
     
     var body: some View {
@@ -186,14 +201,22 @@ struct NotchView: View {
                     // Left ear
                     HStack {
                         if isExpanded {
-                            ProgressIcon(status: daemonClient.globalStatus)
-                                .frame(width: 20, height: 20)
-                                .padding(.leading, 24)
-                                .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            if activeCount > 0 {
+                                ProgressIcon(status: daemonClient.globalStatus)
+                                    .frame(width: 20, height: 20)
+                                    .padding(.leading, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            } else if showingDone {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                    .frame(width: 20, height: 20)
+                                    .padding(.leading, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            }
                         }
                         Spacer(minLength: 0)
                     }
-                    .frame(width: isExpanded ? 130 : 0)
+                    .frame(width: earWidth)
                     .clipped()
                     
                     // The physical hardware notch gap (always dead center)
@@ -204,16 +227,20 @@ struct NotchView: View {
                     HStack {
                         Spacer(minLength: 0)
                         if isExpanded {
-                            Text("\(activeCount) in progress")
-                                .font(.system(size: 14, weight: .medium, design: .default))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.trailing, 24)
-                                .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            if activeCount > 0 {
+                                // Only show spinner loading during active progress; right ear remains empty.
+                            } else if showingDone {
+                                Text("\(doneCount) progress done")
+                                    .font(.system(size: 14, weight: .semibold, design: .default))
+                                    .foregroundColor(.green)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.trailing, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            }
                         }
                     }
-                    .frame(width: isExpanded ? 130 : 0)
+                    .frame(width: earWidth)
                     .clipped()
                 }
                 .frame(height: 38)
@@ -225,12 +252,40 @@ struct NotchView: View {
                     topTrailingRadius: 0,
                     style: .continuous
                 ))
-                // Smooth animation for expansion
-                .animation(.spring(response: 0.5, dampingFraction: 0.7, blendDuration: 0), value: isExpanded)
+                // Smooth animation for expansion and transitions
+                .animation(.spring(response: 0.5, dampingFraction: 0.7, blendDuration: 0), value: earWidth)
                 
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .onAppear {
+            if activeCount > 0 {
+                maxActiveCount = activeCount
+            }
+        }
+        .onChange(of: activeCount) { newCount in
+            if newCount > 0 {
+                doneTimer?.invalidate()
+                doneTimer = nil
+                showingDone = false
+                if newCount > maxActiveCount {
+                    maxActiveCount = newCount
+                }
+            } else {
+                if maxActiveCount > 0 {
+                    doneCount = maxActiveCount
+                    showingDone = true
+                    maxActiveCount = 0
+                    
+                    doneTimer?.invalidate()
+                    doneTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                        DispatchQueue.main.async {
+                            self.showingDone = false
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -2,6 +2,7 @@
 
 ## Changelog
 <!-- Add new changelog entries here for the next batch of work -->
+- Redesigned the Notch progress indicator to only show the loading spinner during active progress (hiding "n in progress" text) and keep the width tight to only hold the spinner (60pt left, 60pt right). Upon completion, it expands to show a green checkmark with "n progress done" (130pt left, 130pt right) for 1 second before collapsing.
 - Normalized carriage returns (`\r` to `\n`) in the CLI wrapper output parser to properly split visual lines.
 - Restructured idle/busy detection to check the last 5 non-empty visual lines instead of scanning the entire scrolling buffer.
 - Added a short-circuit check for idle status bar indicators (`? for shortcuts`, `← for agents`, `ctrl-c again to exit`) on the very bottom visual line, preventing historical completion markers from locking the state.
