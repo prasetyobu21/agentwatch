@@ -100,17 +100,10 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	// We allow a 2-second grace period after user typing.
 	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
 
-	// 1. Check for prompt indicators (like ❯, User:, >, $)
-	containsPatterns := []string{
-		"❯",
-		"User:",
-		">",
-		"$",
-	}
-
 	isPromptPresent := false
 	if isTypingGracePeriod {
 		// If user is typing, we check if the prompt is present ANYWHERE in the buffer
+		containsPatterns := []string{"❯", "User:", ">", "$"}
 		for _, pattern := range containsPatterns {
 			if strings.Contains(cleanStr, pattern) {
 				isPromptPresent = true
@@ -118,14 +111,22 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 			}
 		}
 	} else {
-		// If not in the typing grace period, the prompt must be on the last line
+		// If not in the grace period, check if the prompt is in the last 3 lines of output.
+		// This handles TUIs that render a status bar or help text below the prompt.
 		lines := strings.Split(cleanStr, "\n")
-		var lastLine string
-		if len(lines) > 0 {
-			lastLine = strings.TrimSpace(lines[len(lines)-1])
+		checkLines := lines
+		if len(lines) > 3 {
+			checkLines = lines[len(lines)-3:]
 		}
-		for _, pattern := range containsPatterns {
-			if strings.Contains(lastLine, pattern) {
+		for _, line := range checkLines {
+			trimmedLine := strings.TrimSpace(line)
+			// Check specific contains indicators anywhere on the line
+			if strings.Contains(trimmedLine, "❯") || strings.Contains(trimmedLine, "User:") {
+				isPromptPresent = true
+				break
+			}
+			// Check prefix indicators at the start of the line (e.g. > or $)
+			if strings.HasPrefix(trimmedLine, ">") || strings.HasPrefix(trimmedLine, "$") {
 				isPromptPresent = true
 				break
 			}
@@ -136,14 +137,12 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		return true
 	}
 
-	// 2. If the entire trimmed output ends with standard prompt/question suffixes
-	// (like >, ?, $, :, ))
+	// 2. If the entire trimmed output ends with standard prompt/question suffixes (like >, ?, $)
+	// We exclude : and ) here to prevent false positives from active output (like tool calls or timestamps)
 	suffixPatterns := []string{
 		">",
 		"?",
 		"$",
-		":",
-		")",
 	}
 	for _, pattern := range suffixPatterns {
 		if strings.HasSuffix(cleanStr, pattern) {
