@@ -70,10 +70,10 @@ class DaemonClient: ObservableObject {
         
         if allStatuses.contains("Error") {
             globalStatus = "Error"
-        } else if allStatuses.contains("Waiting") {
-            globalStatus = "Waiting"
         } else if allStatuses.contains("Running") {
             globalStatus = "Running"
+        } else if allStatuses.contains("Waiting") {
+            globalStatus = "Waiting"
         } else {
             globalStatus = "Idle"
         }

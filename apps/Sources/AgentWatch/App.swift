@@ -121,7 +121,7 @@ struct NotchView: View {
     @ObservedObject var daemonClient: DaemonClient
     
     var activeCount: Int {
-        daemonClient.sessions.values.filter { $0.status == "Running" || $0.status == "Waiting" }.count
+        daemonClient.sessions.values.filter { $0.status == "Running" }.count
     }
     
     var isExpanded: Bool {
