@@ -100,9 +100,54 @@ struct AgentWatchApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var notchWindow: NSPanel!
     var daemonClient = DaemonClient()
+    private var daemonProcess: Process? = nil
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        startDaemonIfNeeded()
         setupNotchWindow()
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        daemonProcess?.terminate()
+    }
+    
+    private func startDaemonIfNeeded() {
+        let fm = FileManager.default
+        let exeURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        let exeDir = exeURL.deletingLastPathComponent().path
+        
+        let paths = [
+            exeDir + "/agentwatchd",
+            exeDir + "/../../../bin/agentwatchd",
+            "/usr/local/bin/agentwatchd"
+        ]
+        
+        var daemonBinaryPath: String? = nil
+        for path in paths {
+            let standardPath = (path as NSString).standardizingPath
+            if fm.fileExists(atPath: standardPath) {
+                daemonBinaryPath = standardPath
+                break
+            }
+        }
+        
+        guard let daemonPath = daemonBinaryPath else {
+            print("Could not find agentwatchd binary")
+            return
+        }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: daemonPath)
+        process.standardOutput = nil
+        process.standardError = nil
+        
+        do {
+            try process.run()
+            self.daemonProcess = process
+            print("Started daemon from \(daemonPath)")
+        } catch {
+            print("Failed to start daemon: \(error)")
+        }
     }
     
     func triggerTest(agents: Int, duration: Int) {
