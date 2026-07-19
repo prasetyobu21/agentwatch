@@ -309,9 +309,11 @@ struct NotchView: View {
             var completedCount = 0
             for (id, session) in newSessions {
                 if let oldSession = previousSessions[id] {
-                    let wasActive = (oldSession.status == "Running" || oldSession.status == "Initializing")
-                    let isDone = (session.status == "Finished" || session.status == "Error")
-                    if wasActive && isDone {
+                    let wasRunning = oldSession.status == "Running"
+                    // Interactive agents such as Codex remain alive after a
+                    // turn, so Waiting is the completion signal for the turn.
+                    let isDone = (session.status == "Waiting" || session.status == "Finished" || session.status == "Error")
+                    if wasRunning && isDone {
                         completedCount += 1
                     }
                 }

@@ -1,6 +1,6 @@
 # AgentWatch 🕶️
 
-AgentWatch is a lightweight, real-time activity and progress tracker designed specifically for CLI-based AI coding agents (such as `agy` and Claude Code). It intercepts the agent's interactive terminal output in a pseudo-terminal (PTY) wrapper, parses the stream using stateful heuristics, and renders live status badges and animations directly in your macOS Menu Bar and hardware Notch.
+AgentWatch is a lightweight, real-time activity and progress tracker designed specifically for CLI-based AI coding agents (such as Antigravity, Claude Code, and Codex CLI). It intercepts the agent's interactive terminal output in a pseudo-terminal (PTY) wrapper, parses the stream using stateful heuristics, and renders live status badges and animations directly in your macOS Menu Bar and hardware Notch.
 
 > [!NOTE]
 > AgentWatch is designed for macOS and fits perfectly with the physical hardware notch on modern MacBooks, expanding dynamically when your agents are working and collapsing when they go idle.
@@ -34,11 +34,15 @@ graph TD
   agentwatch agy
   # or
   agentwatch claude
+  # or
+  agentwatch codex
   ```
+  Interactive Codex sessions automatically use Codex's inline display mode so AgentWatch can detect when a turn is ready for your next prompt.
 - **Dynamic Notch Overlay**: A black pill-shaped overlay that expands from the sides of the MacBook notch when agents are busy, and seamlessly transitions away when they finish.
 - **Smart Idle & Busy Heuristics**:
   - Differentiates active thinking spinners from historical completion logs (e.g. Claude's `✻ Crunched for 2s`).
   - Supports custom prompts (`❯`, `User:`, `>`, `$`) and filters typing echoes.
+  - Recognizes Codex CLI's terminal-title activity signal, composer, and approval prompts.
   - Normalizes carriage returns (`\r`) to ensure visual lines map correctly to terminal screen updates.
 - **Live Agent Dropdown**: See a breakdown of all active agents, their states (Color-coded pills), and messages right from the macOS Menu Bar.
 
@@ -81,6 +85,8 @@ swift build -c release
    ./bin/agentwatch agy
    # or
    ./bin/agentwatch claude
+   # or
+   ./bin/agentwatch codex
    ```
 
 3. **Watch the Notch**:

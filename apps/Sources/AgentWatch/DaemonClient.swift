@@ -27,7 +27,9 @@ class DaemonClient: ObservableObject {
     }
     
     func startPolling() {
-        timer = Timer.publish(every: 1.0, on: .main, in: .common)
+        // The daemon is local, so frequent lightweight polling keeps the notch
+        // in sync with short Codex turns without visible lag.
+        timer = Timer.publish(every: 0.1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 self?.fetchStatus()

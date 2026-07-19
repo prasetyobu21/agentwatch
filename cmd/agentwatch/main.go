@@ -50,12 +50,18 @@ type ParserWriter struct {
 	SessionID string
 	AgentName string
 
-	mu            sync.Mutex
-	lastStatus    ipc.AgentStatus
-	outputBuffer  []byte
-	timer         *time.Timer
-	lastInputTime time.Time
+	mu             sync.Mutex
+	lastStatus     ipc.AgentStatus
+	outputBuffer   []byte
+	timer          *time.Timer
+	lastInputTime  time.Time
+	codexTitleSeen bool
+	codexTitleBusy bool
 }
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]?[\x30-\x7e]`)
+var codexTitleRegex = regexp.MustCompile(`\x1b\]0;([^\x07\x1b]*)(?:\x07|\x1b\\)`)
+var brailleSpinnerRegex = regexp.MustCompile(`[⠁-⣿]`)
 
 func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	// Always write to target (os.Stdout)
@@ -70,6 +76,7 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	if len(pw.outputBuffer) > 4096 {
 		pw.outputBuffer = pw.outputBuffer[len(pw.outputBuffer)-4096:]
 	}
+	pw.updateCodexTitleLocked()
 
 	// Synchronously evaluate state on write instead of blindly setting Running.
 	// This prevents the echoed user typing at the prompt from resetting the state to Running.
@@ -83,7 +90,7 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	if pw.timer != nil {
 		pw.timer.Stop()
 	}
-	pw.timer = time.AfterFunc(300*time.Millisecond, pw.checkIdle)
+	pw.timer = time.AfterFunc(100*time.Millisecond, pw.checkIdle)
 
 	return n, err
 }
@@ -91,21 +98,14 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 // Expects pw.mu to be held
 func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	outStr := string(pw.outputBuffer)
-	
+
 	// Strip ANSI escape codes (handles CSI, OSC, and standard 2-character escapes)
-	ansiRegex := regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]?[\x30-\x7e]`)
 	cleanStr := ansiRegex.ReplaceAllString(outStr, "")
 	cleanStr = strings.TrimSpace(cleanStr)
 
 	// Check if the user is currently typing and the prompt is present anywhere in the buffer.
 	// We allow a 2-second grace period after user typing.
 	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
-
-	// Temporary diagnostic logging
-	if f, err := os.OpenFile("/tmp/agentwatch-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
-		fmt.Fprintf(f, "EVAL: agent=%s, typingGrace=%v, lastInput=%v, timeSince=%v, cleanStr=%q\n", pw.AgentName, isTypingGracePeriod, pw.lastInputTime, time.Since(pw.lastInputTime), cleanStr)
-		f.Close()
-	}
 
 	// Replace carriage returns with newlines to normalize TUI line overwrites
 	normalizedStr := strings.ReplaceAll(cleanStr, "\r", "\n")
@@ -123,13 +123,20 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		}
 	}
 
+	if pw.isCodex() {
+		if pw.codexTitleSeen {
+			return !pw.codexTitleBusy
+		}
+		return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
+	}
+
 	// First, check if the very last line of visual output displays an idle status bar indicator.
 	// If it does, the agent is definitely waiting/idle, overriding any older busy indicators in history.
 	if len(lastLines) > 0 {
 		lastLine := strings.ToLower(lastLines[len(lastLines)-1])
-		if strings.Contains(lastLine, "? for shortcuts") || 
-		   strings.Contains(lastLine, "← for agents") || 
-		   strings.Contains(lastLine, "ctrl-c again to exit") {
+		if strings.Contains(lastLine, "? for shortcuts") ||
+			strings.Contains(lastLine, "← for agents") ||
+			strings.Contains(lastLine, "ctrl-c again to exit") {
 			return true
 		}
 	}
@@ -138,15 +145,15 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	// If any of these are present in the last 5 lines, the agent is definitely busy.
 	for _, line := range lastLines {
 		lowerLine := strings.ToLower(line)
-		if strings.Contains(lowerLine, "esc to interrupt") || 
-		   strings.Contains(lowerLine, "esc to cancel") || 
-		   strings.Contains(lowerLine, "generating...") || 
-		   strings.Contains(lowerLine, "booping") || 
-		   strings.Contains(lowerLine, "thinking...") ||
-		   strings.Contains(lowerLine, "working...") {
+		if strings.Contains(lowerLine, "esc to interrupt") ||
+			strings.Contains(lowerLine, "esc to cancel") ||
+			strings.Contains(lowerLine, "generating...") ||
+			strings.Contains(lowerLine, "booping") ||
+			strings.Contains(lowerLine, "thinking...") ||
+			strings.Contains(lowerLine, "working...") {
 			return false
 		}
-		
+
 		// Precise check for active spinners.
 		// Spinners can be single characters on a line or start a line followed by an ellipsis (e.g. "✢Noodling…")
 		spinners := map[string]bool{
@@ -209,6 +216,73 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	return false
 }
 
+// Codex reports its live state in the terminal title: a Braille spinner while
+// working and the plain workspace title when it is ready for another prompt.
+// This is more reliable than trying to reconstruct Codex's cursor-based TUI.
+func (pw *ParserWriter) updateCodexTitleLocked() {
+	if !pw.isCodex() {
+		return
+	}
+	matches := codexTitleRegex.FindAllSubmatch(pw.outputBuffer, -1)
+	if len(matches) == 0 {
+		return
+	}
+	title := string(matches[len(matches)-1][1])
+	pw.codexTitleSeen = true
+	pw.codexTitleBusy = brailleSpinnerRegex.MatchString(title)
+}
+
+func (pw *ParserWriter) isCodex() bool {
+	name := strings.ToLower(strings.TrimSpace(pw.AgentName))
+	return name == "codex" || strings.HasSuffix(name, "/codex")
+}
+
+// codexIsIdle follows the same ordering as the Claude/Antigravity parser:
+// Codex's ready footer is authoritative, then current activity wins over an
+// older composer line retained in the PTY buffer.
+func codexIsIdle(lastLines []string, output string, typingGrace bool) bool {
+	if len(lastLines) > 0 {
+		lastLine := strings.ToLower(lastLines[len(lastLines)-1])
+		if strings.Contains(lastLine, "? for shortcuts") ||
+			strings.Contains(lastLine, "← for agents") ||
+			strings.Contains(lastLine, "ctrl-c again to exit") ||
+			strings.HasPrefix(strings.TrimSpace(lastLines[len(lastLines)-1]), "›") {
+			return true
+		}
+	}
+
+	for _, line := range lastLines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "esc to interrupt") ||
+			strings.Contains(lower, "esc to cancel") ||
+			strings.Contains(lower, "working") ||
+			strings.Contains(lower, "thinking") ||
+			strings.Contains(lower, "planning") ||
+			strings.Contains(lower, "executing") ||
+			strings.Contains(lower, "exploring") ||
+			strings.Contains(lower, "searching") ||
+			strings.Contains(lower, "reading") {
+			return false
+		}
+	}
+
+	for _, line := range lastLines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "do you want to proceed") ||
+			strings.Contains(lower, "allow once") ||
+			strings.Contains(lower, "allow for this session") ||
+			strings.Contains(lower, "approve this command") ||
+			strings.Contains(lower, "approval required") ||
+			strings.Contains(lower, "requires approval") ||
+			strings.Contains(lower, "press enter to continue") ||
+			strings.HasPrefix(strings.TrimSpace(line), "›") {
+			return true
+		}
+	}
+
+	return typingGrace && strings.Contains(output, "›")
+}
+
 func (pw *ParserWriter) checkIdle() {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
@@ -240,12 +314,17 @@ func main() {
 
 	agentName := os.Args[1]
 	args := os.Args[2:]
+	if isCodexInteractive(agentName, args) && !hasArgument(args, "--no-alt-screen") {
+		// Codex's alternate screen only emits cursor updates, so the wrapper cannot
+		// reliably see its final ready prompt. Inline mode preserves that state.
+		args = append(args, "--no-alt-screen")
+	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	sessionID := fmt.Sprintf("%s-%d", agentName, time.Now().Unix())
 
 	cmd := exec.Command(agentName, args...)
-	
+
 	// Start with PTY
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -299,7 +378,7 @@ func main() {
 		SessionID: sessionID,
 		AgentName: agentName,
 	}
-	
+
 	// Set initial initializing state
 	pw.setStatus(ipc.StatusInitializing)
 
@@ -347,4 +426,34 @@ func main() {
 		Status:    ipc.StatusFinished,
 		Message:   "Completed",
 	})
+}
+
+func isCodexInteractive(agentName string, args []string) bool {
+	name := strings.ToLower(strings.TrimSpace(agentName))
+	if name != "codex" && !strings.HasSuffix(name, "/codex") {
+		return false
+	}
+
+	// The root command is the interactive TUI. These commands either run to
+	// completion or manage local Codex state, so they should retain their args.
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		switch arg {
+		case "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "app", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "archive", "delete", "unarchive", "fork", "cloud", "exec-server", "features", "help":
+			return false
+		}
+		break
+	}
+	return true
+}
+
+func hasArgument(args []string, target string) bool {
+	for _, arg := range args {
+		if arg == target {
+			return true
+		}
+	}
+	return false
 }
