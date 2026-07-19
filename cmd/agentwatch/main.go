@@ -100,6 +100,33 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	// We allow a 2-second grace period after user typing.
 	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
 
+	// Temporary diagnostic logging
+	if f, err := os.OpenFile("/tmp/agentwatch-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+		fmt.Fprintf(f, "EVAL: agent=%s, typingGrace=%v, lastInput=%v, timeSince=%v, cleanStr=%q\n", pw.AgentName, isTypingGracePeriod, pw.lastInputTime, time.Since(pw.lastInputTime), cleanStr)
+		f.Close()
+	}
+
+	// 1. Check if the output contains active busy indicators.
+	// If any of these are present, the agent is definitely busy/generating/thinking.
+	lowerStr := strings.ToLower(cleanStr)
+	if strings.Contains(lowerStr, "esc to interrupt") || 
+	   strings.Contains(lowerStr, "esc to cancel") || 
+	   strings.Contains(lowerStr, "generating...") || 
+	   strings.Contains(lowerStr, "booping") || 
+	   strings.Contains(lowerStr, "thinking...") ||
+	   strings.Contains(lowerStr, "working...") ||
+	   strings.Contains(cleanStr, "✻") {
+		return false
+	}
+
+	// Check for Braille spinner characters (indicating active TUI spinners)
+	brailleSpinners := []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+	for _, spinner := range brailleSpinners {
+		if strings.Contains(cleanStr, spinner) {
+			return false
+		}
+	}
+
 	isPromptPresent := false
 	if isTypingGracePeriod {
 		// If user is typing, we check if the prompt is present ANYWHERE in the buffer
