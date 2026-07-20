@@ -222,6 +222,10 @@ struct NotchView: View {
     @State private var showingDone: Bool = false
     @State private var doneCount: Int = 0
     @State private var doneTimer: Timer? = nil
+    @State private var displayedAttentionKind: String? = nil
+    @State private var displayedAttentionCount: Int = 0
+    @State private var attentionShownAt: Date = .distantPast
+    @State private var attentionTimer: Timer? = nil
     
     var activeCount: Int {
         activeSessions.count
@@ -256,25 +260,25 @@ struct NotchView: View {
     }
 
     var attentionText: String? {
-        if permissionCount > 0 {
-            return "Asking for permission (\(permissionCount))"
+        if displayedAttentionKind == "permission" {
+            return "Asking for permission (\(displayedAttentionCount))"
         }
-        if inputCount > 0 {
-            return "Asking for input (\(inputCount))"
+        if displayedAttentionKind == "input" {
+            return "Asking for input (\(displayedAttentionCount))"
         }
         return nil
     }
     
     var isExpanded: Bool {
-        activeCount > 0 || showingDone
+        activeCount > 0 || attentionText != nil || showingDone
     }
     
     var earWidth: CGFloat {
-        if permissionCount > 0 {
+        if displayedAttentionKind == "permission" {
             // The permission label plus its trailing inset is wider than the
             // compact progress ear. Keep it fully outside the physical notch.
             return 220
-        } else if inputCount > 0 {
+        } else if displayedAttentionKind == "input" {
             // Input requests use a shorter label and do not need the extra
             // trailing space reserved for permission text.
             return 150
@@ -294,7 +298,12 @@ struct NotchView: View {
                     // Left ear
                     HStack {
                         if isExpanded {
-                            if activeCount > 0 {
+                            if attentionText != nil {
+                                ProgressIcon(status: "Waiting")
+                                    .frame(width: 20, height: 20)
+                                    .padding(.leading, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            } else if activeCount > 0 {
                                 ProgressIcon(status: activeIndicatorStatus)
                                     .frame(width: 20, height: 20)
                                     .padding(.leading, 24)
@@ -322,7 +331,7 @@ struct NotchView: View {
                             if let attentionText {
                                 Text(attentionText)
                                     .font(.system(size: 14, weight: .semibold, design: .default))
-                                    .foregroundColor(permissionCount > 0 ? .yellow : .orange)
+                                    .foregroundColor(displayedAttentionKind == "permission" ? .yellow : .orange)
                                     .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
                                     .padding(.leading, 12)
@@ -363,8 +372,10 @@ struct NotchView: View {
         }
         .onAppear {
             previousSessions = daemonClient.sessions
+            refreshAttentionState()
         }
         .onChange(of: daemonClient.sessions) { newSessions in
+            refreshAttentionState()
             for (id, session) in newSessions {
                 if let oldSession = previousSessions[id] {
                     let wasWorking = ["starting", "running", "executing_tool", "permission_resolving"].contains(oldSession.state)
@@ -399,6 +410,47 @@ struct NotchView: View {
             }
 
             previousSessions = newSessions
+        }
+        .onDisappear {
+            attentionTimer?.invalidate()
+        }
+    }
+
+    private func refreshAttentionState() {
+        let nextKind: String?
+        let nextCount: Int
+        if permissionCount > 0 {
+            nextKind = "permission"
+            nextCount = permissionCount
+        } else if inputCount > 0 {
+            nextKind = "input"
+            nextCount = inputCount
+        } else {
+            nextKind = nil
+            nextCount = 0
+        }
+
+        if let nextKind {
+            attentionTimer?.invalidate()
+            attentionTimer = nil
+            if displayedAttentionKind != nextKind {
+                attentionShownAt = Date()
+            }
+            displayedAttentionKind = nextKind
+            displayedAttentionCount = nextCount
+            return
+        }
+
+        guard displayedAttentionKind != nil else { return }
+        let remaining = max(0, 2.0 - Date().timeIntervalSince(attentionShownAt))
+        attentionTimer?.invalidate()
+        attentionTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { _ in
+            DispatchQueue.main.async {
+                guard permissionCount == 0 && inputCount == 0 else { return }
+                displayedAttentionKind = nil
+                displayedAttentionCount = 0
+                attentionTimer = nil
+            }
         }
     }
 }
