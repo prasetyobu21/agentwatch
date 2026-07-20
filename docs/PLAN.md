@@ -7,7 +7,7 @@ AgentWatch is a macOS menu bar app that monitors terminal AI agents.
 I frequently use the terminal to run multiple coding agents (such as Claude Code, Codex, and Antigravity) concurrently. Since I often multitask in other windows while these agents are executing, it's easy to lose track of their progress. AgentWatch solves this by providing a persistent notch/menu bar UI that instantly alerts me when an agent has finished a task or requires my input, without needing to constantly check the terminal.
 
 ## Architecture
-- agentwatch: CLI wrapper (Go)
+- aw: CLI wrapper (Go; source lives in `cmd/agentwatch`)
 - agentwatchd: daemon (Go)
 - AgentWatch.app: SwiftUI menu bar UI
 

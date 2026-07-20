@@ -2,7 +2,7 @@
 set -e
 
 echo "🔨 Building Go binaries..."
-go build -o bin/agentwatch ./cmd/agentwatch
+go build -o bin/aw ./cmd/agentwatch
 go build -o bin/agentwatchd ./cmd/agentwatchd
 
 echo "🔨 Building Swift app..."

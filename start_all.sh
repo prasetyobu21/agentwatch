@@ -16,7 +16,7 @@ echo "=========================================================="
 echo ""
 echo "Try running a test command in a new terminal tab:"
 echo "    cd ~/Documents/Coding/agentwatch"
-echo "    ./bin/agentwatch sleep 10"
+echo "    ./bin/aw sleep 10"
 echo ""
 echo "Press Ctrl+C here to stop the daemon and close the menu bar app."
 
