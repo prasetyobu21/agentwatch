@@ -56,6 +56,7 @@ type ParserWriter struct {
 	Client    *http.Client
 	SessionID string
 	AgentName string
+	deliver   func(ipc.AgentEvent)
 
 	mu                sync.Mutex
 	lastState         ipc.AgentState
@@ -66,6 +67,8 @@ type ParserWriter struct {
 	permissionShownAt time.Time
 	codexTitleSeen    bool
 	codexTitleBusy    bool
+	codexTitle        string
+	codexTitleChanged bool
 	terminal          *terminal.Model
 	recentInput       []inputRecord
 }
@@ -163,6 +166,21 @@ func (pw *ParserWriter) classifyLocked() ipc.AgentState {
 		if strings.Contains(recentScreen, marker) {
 			return ipc.StateRunning
 		}
+	}
+	// A Codex title is durable state, so an old spinner title can survive a
+	// later redraw that contains no activity. Only a newly changed busy title
+	// is evidence that an idle session started working again.
+	if pw.isCodex() && pw.codexTitleChanged && pw.codexTitleBusy {
+		return ipc.StateRunning
+	}
+	// Focus changes and other terminal events can repaint an idle TUI without
+	// its composer/footer. Do not turn that ambiguous redraw into activity. An
+	// Enter observed at the prompt is sufficient evidence of a submitted turn.
+	if pw.lastState == ipc.StateIdle {
+		if pw.lastInputKindLocked() == "enter" {
+			return ipc.StateRunning
+		}
+		return ipc.StateIdle
 	}
 	return ipc.StateRunning
 }
@@ -360,12 +378,15 @@ func (pw *ParserWriter) updateCodexTitleLocked() {
 	if !pw.isCodex() {
 		return
 	}
+	pw.codexTitleChanged = false
 	matches := codexTitleRegex.FindAllSubmatch(pw.outputBuffer, -1)
 	if len(matches) == 0 {
 		return
 	}
 	title := string(matches[len(matches)-1][1])
+	pw.codexTitleChanged = !pw.codexTitleSeen || title != pw.codexTitle
 	pw.codexTitleSeen = true
+	pw.codexTitle = title
 	pw.codexTitleBusy = brailleSpinnerRegex.MatchString(title)
 }
 
@@ -447,7 +468,7 @@ func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
 			pw.permissionShownAt = time.Time{}
 		}
 		pw.sequence++
-		go sendEvent(pw.Client, ipc.AgentEvent{
+		event := ipc.AgentEvent{
 			SessionID:  pw.SessionID,
 			Agent:      pw.AgentName,
 			State:      state,
@@ -455,7 +476,8 @@ func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
 			Confidence: 0.75,
 			Summary:    string(state),
 			Source:     source,
-		})
+		}
+		go pw.deliverEvent(event)
 	}
 }
 
@@ -469,8 +491,32 @@ func (pw *ParserWriter) setStateWithSummary(state ipc.AgentState, summary, sourc
 	if pw.lastState != state {
 		pw.lastState = state
 		pw.sequence++
-		go sendEvent(pw.Client, ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source})
+		go pw.deliverEvent(ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source})
 	}
+}
+
+func (pw *ParserWriter) setFinalStateWithSummary(state ipc.AgentState, summary, source string) {
+	pw.mu.Lock()
+	if pw.lastState == state {
+		pw.mu.Unlock()
+		return
+	}
+	pw.lastState = state
+	pw.sequence++
+	event := ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source}
+	pw.mu.Unlock()
+
+	// The wrapper exits immediately after this transition. Wait for delivery so
+	// the terminal state cannot be abandoned in an async goroutine.
+	pw.deliverEvent(event)
+}
+
+func (pw *ParserWriter) deliverEvent(event ipc.AgentEvent) {
+	if pw.deliver != nil {
+		pw.deliver(event)
+		return
+	}
+	sendEvent(pw.Client, event)
 }
 
 func main() {
@@ -569,24 +615,27 @@ func main() {
 				break
 			}
 			if n > 0 {
-				pw.mu.Lock()
-				hasEnter := false
-				for i := 0; i < n; i++ {
-					if buf[i] == '\n' || buf[i] == '\r' {
-						hasEnter = true
-						break
+				forwardedInput, userInput := normalizeFocusInput(buf[:n])
+				if len(userInput) > 0 {
+					pw.mu.Lock()
+					hasEnter := false
+					for _, inputByte := range userInput {
+						if inputByte == '\n' || inputByte == '\r' {
+							hasEnter = true
+							break
+						}
 					}
+					if hasEnter {
+						pw.lastInputTime = time.Time{}
+					} else {
+						pw.lastInputTime = time.Now()
+					}
+					pw.recordInputLocked(userInput)
+					pw.setStateLocked(pw.classifyLocked(), "input-observation")
+					pw.mu.Unlock()
 				}
-				if hasEnter {
-					pw.lastInputTime = time.Time{}
-				} else {
-					pw.lastInputTime = time.Now()
-				}
-				pw.recordInputLocked(buf[:n])
-				pw.setStateLocked(pw.classifyLocked(), "input-observation")
-				pw.mu.Unlock()
 
-				_, err = ptmx.Write(buf[:n])
+				_, err = ptmx.Write(forwardedInput)
 				if err != nil {
 					break
 				}
@@ -601,7 +650,33 @@ func main() {
 	if exitErr != nil {
 		state, summary = ipc.StateFailed, exitErr.Error()
 	}
-	pw.setStateWithSummary(state, summary, "process-lifecycle")
+	pw.setFinalStateWithSummary(state, summary, "process-lifecycle")
+}
+
+// Coding-agent TUIs use terminal focus reporting to reduce redraws while the
+// terminal is in the background. Keep the child PTY logically focused so its
+// completion prompt is still emitted, while excluding those control bytes from
+// user-input classification.
+func normalizeFocusInput(data []byte) (forwarded, userInput []byte) {
+	focusIn := []byte{'\x1b', '[', 'I'}
+	focusOut := []byte{'\x1b', '[', 'O'}
+	if !bytes.Contains(data, focusIn) && !bytes.Contains(data, focusOut) {
+		return data, data
+	}
+
+	forwarded = make([]byte, 0, len(data))
+	userInput = make([]byte, 0, len(data))
+	for offset := 0; offset < len(data); {
+		if bytes.HasPrefix(data[offset:], focusIn) || bytes.HasPrefix(data[offset:], focusOut) {
+			forwarded = append(forwarded, focusIn...)
+			offset += len(focusIn)
+			continue
+		}
+		forwarded = append(forwarded, data[offset])
+		userInput = append(userInput, data[offset])
+		offset++
+	}
+	return forwarded, userInput
 }
 
 // recordInputLocked only keeps coarse, short-lived categories. It never stores

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -115,6 +116,123 @@ func TestCodexReadyScreenOverridesStaleBusyTitle(t *testing.T) {
 	pw.updateCodexTitleLocked()
 	if got := pw.classifyLocked(); got != ipc.StateIdle {
 		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateIdle)
+	}
+}
+
+func TestAmbiguousFocusRedrawKeepsCodexIdle(t *testing.T) {
+	m := terminal.New(100, 10)
+	output := "\x1b]0;⠴ agentwatch\x07\n› Ask Codex anything\n? for shortcuts"
+	if err := m.Write([]byte(output)); err != nil {
+		t.Fatal(err)
+	}
+	pw := &ParserWriter{
+		AgentName:    "codex",
+		terminal:     m,
+		outputBuffer: []byte(output),
+		lastState:    ipc.StateIdle,
+	}
+	pw.updateCodexTitleLocked()
+
+	// Losing terminal focus can repaint the screen without the ready footer or
+	// a new title. The old spinner title must not reactivate an idle session.
+	pw.terminal = terminal.New(100, 10)
+	redraw := "agentwatch workspace"
+	if err := pw.terminal.Write([]byte(redraw)); err != nil {
+		t.Fatal(err)
+	}
+	pw.outputBuffer = append(pw.outputBuffer, []byte(redraw)...)
+	pw.updateCodexTitleLocked()
+
+	if got := pw.classifyLocked(); got != ipc.StateIdle {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateIdle)
+	}
+}
+
+func TestFreshCodexBusyTitleStartsRunningFromIdle(t *testing.T) {
+	pw := &ParserWriter{AgentName: "codex", lastState: ipc.StateIdle}
+	pw.outputBuffer = []byte("\x1b]0;agentwatch\x07")
+	pw.updateCodexTitleLocked()
+	pw.outputBuffer = []byte("\x1b]0;⠴ agentwatch\x07")
+	pw.updateCodexTitleLocked()
+
+	if got := pw.classifyLocked(); got != ipc.StateRunning {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
+	}
+}
+
+func TestFinalStateWaitsForDelivery(t *testing.T) {
+	deliveryStarted := make(chan struct{})
+	releaseDelivery := make(chan struct{})
+	returned := make(chan struct{})
+	pw := &ParserWriter{
+		SessionID: "claude-1",
+		AgentName: "claude",
+		lastState: ipc.StateRunning,
+		deliver: func(event ipc.AgentEvent) {
+			if event.State != ipc.StateCompleted {
+				t.Errorf("state = %q, want %q", event.State, ipc.StateCompleted)
+			}
+			close(deliveryStarted)
+			<-releaseDelivery
+		},
+	}
+
+	go func() {
+		pw.setFinalStateWithSummary(ipc.StateCompleted, "Completed", "process-lifecycle")
+		close(returned)
+	}()
+
+	<-deliveryStarted
+	select {
+	case <-returned:
+		t.Fatal("setFinalStateWithSummary returned before delivery completed")
+	default:
+	}
+	close(releaseDelivery)
+	<-returned
+}
+
+func TestNormalizeFocusInputKeepsAgentTUIFocused(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         []byte
+		wantForwarded []byte
+		wantUserInput []byte
+	}{
+		{
+			name:          "focus lost becomes focus gained",
+			input:         []byte("\x1b[O"),
+			wantForwarded: []byte("\x1b[I"),
+		},
+		{
+			name:          "focus gained is not user input",
+			input:         []byte("\x1b[I"),
+			wantForwarded: []byte("\x1b[I"),
+		},
+		{
+			name:          "mixed input preserves typed bytes",
+			input:         []byte("a\x1b[Ob"),
+			wantForwarded: []byte("a\x1b[Ib"),
+			wantUserInput: []byte("ab"),
+		},
+		{
+			name:          "other escape sequence is untouched",
+			input:         []byte("\x1b[A"),
+			wantForwarded: []byte("\x1b[A"),
+			wantUserInput: []byte("\x1b[A"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			forwarded, userInput := normalizeFocusInput(test.input)
+			if !bytes.Equal(forwarded, test.wantForwarded) {
+				t.Fatalf("forwarded = %q, want %q", forwarded, test.wantForwarded)
+			}
+			if !bytes.Equal(userInput, test.wantUserInput) {
+				t.Fatalf("userInput = %q, want %q", userInput, test.wantUserInput)
+			}
+		})
 	}
 }
 
