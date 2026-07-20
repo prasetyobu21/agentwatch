@@ -160,6 +160,38 @@ func TestFreshCodexBusyTitleStartsRunningFromIdle(t *testing.T) {
 	}
 }
 
+func TestFinalStateWaitsForDelivery(t *testing.T) {
+	deliveryStarted := make(chan struct{})
+	releaseDelivery := make(chan struct{})
+	returned := make(chan struct{})
+	pw := &ParserWriter{
+		SessionID: "claude-1",
+		AgentName: "claude",
+		lastState: ipc.StateRunning,
+		deliver: func(event ipc.AgentEvent) {
+			if event.State != ipc.StateCompleted {
+				t.Errorf("state = %q, want %q", event.State, ipc.StateCompleted)
+			}
+			close(deliveryStarted)
+			<-releaseDelivery
+		},
+	}
+
+	go func() {
+		pw.setFinalStateWithSummary(ipc.StateCompleted, "Completed", "process-lifecycle")
+		close(returned)
+	}()
+
+	<-deliveryStarted
+	select {
+	case <-returned:
+		t.Fatal("setFinalStateWithSummary returned before delivery completed")
+	default:
+	}
+	close(releaseDelivery)
+	<-returned
+}
+
 func TestNormalizeFocusInputKeepsAgentTUIFocused(t *testing.T) {
 	tests := []struct {
 		name          string

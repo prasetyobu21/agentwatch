@@ -80,10 +80,17 @@ final class DaemonClient: NSObject, ObservableObject, URLSessionDataDelegate {
 
     func fetchStatus() {
         guard let url = URL(string: "http://127.0.0.1:8765/v1/status") else { return }
+        // Remember exactly what the client knew when this snapshot began. An
+        // absent, unchanged session is stale and can be removed; a newer SSE
+        // event arriving while the request is in flight must be preserved.
+        let knownSequences = sessions.mapValues(\.sequence)
         URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let self, error == nil, let data else { return }
             guard let decoded = try? JSONDecoder().decode([String: AgentSession].self, from: data) else { return }
             DispatchQueue.main.async {
+                for (id, sequence) in knownSequences where decoded[id] == nil && self.sessions[id]?.sequence == sequence {
+                    self.sessions.removeValue(forKey: id)
+                }
                 for (id, session) in decoded where session.sequence >= (self.sessions[id]?.sequence ?? 0) {
                     self.sessions[id] = session
                     self.lastEventID = max(self.lastEventID, session.sequence)

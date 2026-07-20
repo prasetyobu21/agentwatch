@@ -56,6 +56,7 @@ type ParserWriter struct {
 	Client    *http.Client
 	SessionID string
 	AgentName string
+	deliver   func(ipc.AgentEvent)
 
 	mu                sync.Mutex
 	lastState         ipc.AgentState
@@ -467,7 +468,7 @@ func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
 			pw.permissionShownAt = time.Time{}
 		}
 		pw.sequence++
-		go sendEvent(pw.Client, ipc.AgentEvent{
+		event := ipc.AgentEvent{
 			SessionID:  pw.SessionID,
 			Agent:      pw.AgentName,
 			State:      state,
@@ -475,7 +476,8 @@ func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
 			Confidence: 0.75,
 			Summary:    string(state),
 			Source:     source,
-		})
+		}
+		go pw.deliverEvent(event)
 	}
 }
 
@@ -489,8 +491,32 @@ func (pw *ParserWriter) setStateWithSummary(state ipc.AgentState, summary, sourc
 	if pw.lastState != state {
 		pw.lastState = state
 		pw.sequence++
-		go sendEvent(pw.Client, ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source})
+		go pw.deliverEvent(ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source})
 	}
+}
+
+func (pw *ParserWriter) setFinalStateWithSummary(state ipc.AgentState, summary, source string) {
+	pw.mu.Lock()
+	if pw.lastState == state {
+		pw.mu.Unlock()
+		return
+	}
+	pw.lastState = state
+	pw.sequence++
+	event := ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source}
+	pw.mu.Unlock()
+
+	// The wrapper exits immediately after this transition. Wait for delivery so
+	// the terminal state cannot be abandoned in an async goroutine.
+	pw.deliverEvent(event)
+}
+
+func (pw *ParserWriter) deliverEvent(event ipc.AgentEvent) {
+	if pw.deliver != nil {
+		pw.deliver(event)
+		return
+	}
+	sendEvent(pw.Client, event)
 }
 
 func main() {
@@ -624,7 +650,7 @@ func main() {
 	if exitErr != nil {
 		state, summary = ipc.StateFailed, exitErr.Error()
 	}
-	pw.setStateWithSummary(state, summary, "process-lifecycle")
+	pw.setFinalStateWithSummary(state, summary, "process-lifecycle")
 }
 
 // Coding-agent TUIs use terminal focus reporting to reduce redraws while the
