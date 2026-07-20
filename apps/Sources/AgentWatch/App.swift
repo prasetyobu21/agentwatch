@@ -16,7 +16,7 @@ struct AgentWatchApp: App {
                 
                 Divider()
                 
-                let activeSessions = Array(appDelegate.daemonClient.sessions.values).filter { $0.status == "Running" || $0.status == "Initializing" || $0.status == "Waiting" }
+                let activeSessions = Array(appDelegate.daemonClient.sessions.values).filter { !["idle", "completed", "failed", "orphaned"].contains($0.state) }
                 if activeSessions.isEmpty {
                     Text("No active agents (Idle)")
                         .foregroundColor(.gray)
@@ -37,12 +37,12 @@ struct AgentWatchApp: App {
                                 }
                                 Spacer()
                                 
-                                Text(session.status)
+                                Text(session.state.replacingOccurrences(of: "_", with: " ").capitalized)
                                     .font(.system(size: 10, weight: .bold))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(statusColor(session.status).opacity(0.15))
-                                    .foregroundColor(statusColor(session.status))
+                                    .background(statusColor(session.state).opacity(0.15))
+                                    .foregroundColor(statusColor(session.state))
                                     .cornerRadius(4)
                             }
                         }
@@ -85,13 +85,15 @@ struct AgentWatchApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    func statusColor(_ status: String) -> Color {
-        switch status {
-        case "Initializing": return .blue
-        case "Running": return .green
-        case "Waiting": return .yellow
-        case "Finished": return .gray
-        case "Error": return .red
+    func statusColor(_ state: String) -> Color {
+        switch state {
+        case "starting": return .blue
+        case "running", "executing_tool": return .white
+        case "permission_required", "permission_resolving": return .orange
+        case "input_required": return .yellow
+        case "completed": return .green
+        case "failed": return .red
+        case "orphaned": return .gray
         default: return .primary
         }
     }
@@ -220,17 +222,67 @@ struct NotchView: View {
     @State private var showingDone: Bool = false
     @State private var doneCount: Int = 0
     @State private var doneTimer: Timer? = nil
+    @State private var displayedAttentionKind: String? = nil
+    @State private var displayedAttentionCount: Int = 0
+    @State private var attentionShownAt: Date = .distantPast
+    @State private var attentionTimer: Timer? = nil
     
     var activeCount: Int {
-        daemonClient.sessions.values.filter { $0.status == "Running" || $0.status == "Initializing" }.count
+        activeSessions.count
+    }
+
+    private var activeSessions: [AgentSession] {
+        daemonClient.sessions.values.filter {
+            ["starting", "running", "executing_tool", "permission_resolving", "permission_required", "input_required"].contains($0.state)
+        }
+    }
+
+    // The notch must derive both its visibility and its icon from the same
+    // sessions. `globalStatus` is an aggregate convenience label and can lag
+    // behind an individual state update during SSE recovery.
+    private var activeIndicatorStatus: String {
+        let states = Set(activeSessions.map(\.state))
+        if states.contains("permission_required") || states.contains("input_required") {
+            return "Waiting"
+        }
+        if states.contains("starting") && !states.contains(where: { $0 != "starting" }) {
+            return "Initializing"
+        }
+        return "Running"
+    }
+
+    var permissionCount: Int {
+        daemonClient.sessions.values.filter { $0.state == "permission_required" }.count
+    }
+
+    var inputCount: Int {
+        daemonClient.sessions.values.filter { $0.state == "input_required" }.count
+    }
+
+    var attentionText: String? {
+        if displayedAttentionKind == "permission" {
+            return "Asking for permission (\(displayedAttentionCount))"
+        }
+        if displayedAttentionKind == "input" {
+            return "Asking for input (\(displayedAttentionCount))"
+        }
+        return nil
     }
     
     var isExpanded: Bool {
-        activeCount > 0 || showingDone
+        activeCount > 0 || attentionText != nil || showingDone
     }
     
     var earWidth: CGFloat {
-        if showingDone {
+        if displayedAttentionKind == "permission" {
+            // The permission label plus its trailing inset is wider than the
+            // compact progress ear. Keep it fully outside the physical notch.
+            return 220
+        } else if displayedAttentionKind == "input" {
+            // Input requests use a shorter label and do not need the extra
+            // trailing space reserved for permission text.
+            return 150
+        } else if showingDone {
             return 130
         } else if activeCount > 0 {
             return 60
@@ -246,8 +298,13 @@ struct NotchView: View {
                     // Left ear
                     HStack {
                         if isExpanded {
-                            if activeCount > 0 {
-                                ProgressIcon(status: daemonClient.globalStatus)
+                            if attentionText != nil {
+                                ProgressIcon(status: "Waiting")
+                                    .frame(width: 20, height: 20)
+                                    .padding(.leading, 24)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                            } else if activeCount > 0 {
+                                ProgressIcon(status: activeIndicatorStatus)
                                     .frame(width: 20, height: 20)
                                     .padding(.leading, 24)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
@@ -270,9 +327,18 @@ struct NotchView: View {
                     
                     // Right ear
                     HStack {
-                        Spacer(minLength: 0)
                         if isExpanded {
-                            if showingDone {
+                            if let attentionText {
+                                Text(attentionText)
+                                    .font(.system(size: 14, weight: .semibold, design: .default))
+                                    .foregroundColor(displayedAttentionKind == "permission" ? .yellow : .orange)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.leading, 12)
+                                    .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                                Spacer(minLength: 0)
+                            } else if showingDone {
+                                Spacer(minLength: 0)
                                 Text("\(doneCount) progress done")
                                     .font(.system(size: 14, weight: .semibold, design: .default))
                                     .foregroundColor(.green)
@@ -281,6 +347,8 @@ struct NotchView: View {
                                     .padding(.trailing, 24)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
                             }
+                        } else {
+                            Spacer(minLength: 0)
                         }
                     }
                     .frame(width: earWidth)
@@ -304,35 +372,85 @@ struct NotchView: View {
         }
         .onAppear {
             previousSessions = daemonClient.sessions
+            refreshAttentionState()
         }
         .onChange(of: daemonClient.sessions) { newSessions in
-            var completedCount = 0
+            refreshAttentionState()
             for (id, session) in newSessions {
                 if let oldSession = previousSessions[id] {
-                    let wasRunning = oldSession.status == "Running"
-                    // Interactive agents such as Codex remain alive after a
-                    // turn, so Waiting is the completion signal for the turn.
-                    let isDone = (session.status == "Waiting" || session.status == "Finished" || session.status == "Error")
-                    if wasRunning && isDone {
-                        completedCount += 1
+                    let wasWorking = ["starting", "running", "executing_tool", "permission_resolving"].contains(oldSession.state)
+                    // Permission/input states are attention requests, never a
+                    // completion. Interactive agents report a completed turn
+                    // through their normal idle prompt.
+                    // Older wrappers only report an ambiguous Waiting state.
+                    // The daemon maps it to idle, but it must not produce a
+                    // false completion animation. New screen-classified idle
+                    // states still represent a completed interactive turn.
+                    let isDone = session.state == "completed" ||
+                        (session.state == "idle" && session.source != "legacy-event")
+                    if wasWorking && isDone {
+                        // Approval TUIs can briefly paint an idle-looking
+                        // composer before their permission menu. Only announce
+                        // completion if this state survives the redraw.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            guard daemonClient.sessions[id]?.state == session.state else { return }
+                            doneCount += 1
+                            showingDone = true
+
+                            doneTimer?.invalidate()
+                            doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                                DispatchQueue.main.async {
+                                    self.showingDone = false
+                                    self.doneCount = 0
+                                }
+                            }
+                        }
                     }
                 }
             }
-            
-            if completedCount > 0 {
-                doneCount += completedCount
-                showingDone = true
-                
-                doneTimer?.invalidate()
-                doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
-                    DispatchQueue.main.async {
-                        self.showingDone = false
-                        self.doneCount = 0
-                    }
-                }
-            }
-            
+
             previousSessions = newSessions
+        }
+        .onDisappear {
+            attentionTimer?.invalidate()
+        }
+    }
+
+    private func refreshAttentionState() {
+        let nextKind: String?
+        let nextCount: Int
+        if permissionCount > 0 {
+            nextKind = "permission"
+            nextCount = permissionCount
+        } else if inputCount > 0 {
+            nextKind = "input"
+            nextCount = inputCount
+        } else {
+            nextKind = nil
+            nextCount = 0
+        }
+
+        if let nextKind {
+            attentionTimer?.invalidate()
+            attentionTimer = nil
+            if displayedAttentionKind != nextKind {
+                attentionShownAt = Date()
+            }
+            displayedAttentionKind = nextKind
+            displayedAttentionCount = nextCount
+            return
+        }
+
+        guard displayedAttentionKind != nil else { return }
+        let remaining = max(0, 2.0 - Date().timeIntervalSince(attentionShownAt))
+        attentionTimer?.invalidate()
+        attentionTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { _ in
+            DispatchQueue.main.async {
+                guard permissionCount == 0 && inputCount == 0 else { return }
+                displayedAttentionKind = nil
+                displayedAttentionCount = 0
+                attentionTimer = nil
+            }
         }
     }
 }

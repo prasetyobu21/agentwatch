@@ -17,19 +17,26 @@ import (
 	"time"
 
 	"github.com/agentwatch/agentwatch/internal/ipc"
+	"github.com/agentwatch/agentwatch/internal/terminal"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
-func sendEvent(client *http.Client, event ipc.Event) {
+func sendEvent(client *http.Client, event ipc.AgentEvent) {
 	event.PID = os.Getpid()
+	if event.Version == 0 {
+		event.Version = 1
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("Failed to marshal event: %v", err)
 		return
 	}
 
-	req, err := http.NewRequest("POST", "http://"+ipc.ServerAddress+"/event", bytes.NewReader(data))
+	req, err := http.NewRequest("POST", "http://"+ipc.ServerAddress+"/v1/event", bytes.NewReader(data))
 	if err != nil {
 		log.Printf("Failed to create request: %v", err)
 		return
@@ -50,18 +57,45 @@ type ParserWriter struct {
 	SessionID string
 	AgentName string
 
-	mu             sync.Mutex
-	lastStatus     ipc.AgentStatus
-	outputBuffer   []byte
-	timer          *time.Timer
-	lastInputTime  time.Time
-	codexTitleSeen bool
-	codexTitleBusy bool
+	mu                sync.Mutex
+	lastState         ipc.AgentState
+	sequence          uint64
+	outputBuffer      []byte
+	timer             *time.Timer
+	lastInputTime     time.Time
+	permissionShownAt time.Time
+	codexTitleSeen    bool
+	codexTitleBusy    bool
+	terminal          *terminal.Model
+	recentInput       []inputRecord
+}
+
+type inputRecord struct {
+	kind string
+	at   time.Time
 }
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]?[\x30-\x7e]`)
 var codexTitleRegex = regexp.MustCompile(`\x1b\]0;([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 var brailleSpinnerRegex = regexp.MustCompile(`[⠁-⣿]`)
+var permissionMarkers = []string{
+	"allow once",
+	"allow for this session",
+	"always allow",
+	"allow this command",
+	"approve this command",
+	"approval required",
+	"requires approval",
+	"permission required",
+	"do you want to proceed",
+	"would you like to proceed",
+	"do you want to allow",
+	"would you like to allow",
+	"would you like to run the following command",
+	"yes, proceed",
+	"yes, and don't ask again",
+	"deny",
+}
 
 func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	// Always write to target (os.Stdout)
@@ -77,14 +111,11 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 		pw.outputBuffer = pw.outputBuffer[len(pw.outputBuffer)-4096:]
 	}
 	pw.updateCodexTitleLocked()
-
-	// Synchronously evaluate state on write instead of blindly setting Running.
-	// This prevents the echoed user typing at the prompt from resetting the state to Running.
-	if pw.isCurrentlyIdleLocked() {
-		pw.setStatus(ipc.StatusWaiting)
-	} else {
-		pw.setStatus(ipc.StatusRunning)
+	if pw.terminal != nil {
+		_ = pw.terminal.Write(p)
 	}
+
+	pw.setStateLocked(pw.classifyLocked(), "screen-classifier")
 
 	// Debounce timer for idle detection
 	if pw.timer != nil {
@@ -93,6 +124,109 @@ func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	pw.timer = time.AfterFunc(100*time.Millisecond, pw.checkIdle)
 
 	return n, err
+}
+
+func (pw *ParserWriter) classifyLocked() ipc.AgentState {
+	var screen string
+	if pw.terminal != nil {
+		screen = strings.ToLower(strings.Join(pw.terminal.Snapshot().Lines, "\n"))
+	}
+	if screen == "" {
+		screen = strings.ToLower(ansiRegex.ReplaceAllString(string(pw.outputBuffer), ""))
+	}
+	recentScreen := strings.ToLower(strings.Join(pw.recentVisibleLinesLocked(), "\n"))
+	// A permission request is more urgent than an ordinary prompt and must win.
+	if hasPermissionRequest(screen) {
+		// An Enter that submitted the user's original prompt is not an
+		// approval. Only interpret Enter as approval after the permission
+		// state has already been published and shown to the user.
+		if pw.lastState == ipc.StatePermissionRequired && pw.lastInputKindLocked() == "enter" {
+			return ipc.StatePermissionResolving
+		}
+		return ipc.StatePermissionRequired
+	}
+	// Question marks and question-like prose are common in normal model output.
+	// Only raise an input alert when the visible TUI includes interaction chrome
+	// that tells the user how to answer an AskUserQuestion-style prompt.
+	if hasInputRequestUI(recentScreen) {
+		return ipc.StateInputRequired
+	}
+	if pw.isCurrentlyIdleLocked() {
+		return ipc.StateIdle
+	}
+	for _, marker := range []string{"executing ", "running command", "tool use", "editing ", "apply_patch", " rg ", " git "} {
+		if strings.Contains(recentScreen, marker) {
+			return ipc.StateExecutingTool
+		}
+	}
+	for _, marker := range []string{"esc to interrupt", "esc to cancel", "generating", "thinking", "working", "planning", "searching", "reading", "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"} {
+		if strings.Contains(recentScreen, marker) {
+			return ipc.StateRunning
+		}
+	}
+	return ipc.StateRunning
+}
+
+// recentVisibleLinesLocked returns only what is currently painted nearest the
+// cursor. Terminal output above that area often contains stale activity text,
+// which must not keep a completed session in the running state.
+func (pw *ParserWriter) recentVisibleLinesLocked() []string {
+	var lines []string
+	if pw.terminal != nil {
+		lines = pw.terminal.Snapshot().Lines
+	} else {
+		clean := ansiRegex.ReplaceAllString(string(pw.outputBuffer), "")
+		lines = strings.Split(strings.ReplaceAll(clean, "\r", "\n"), "\n")
+	}
+	var recent []string
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		recent = append([]string{line}, recent...)
+		if len(recent) == 5 {
+			break
+		}
+	}
+	return recent
+}
+
+func hasInputRequestUI(screen string) bool {
+	for _, marker := range []string{
+		"enter to select",
+		"enter to submit",
+		"enter to confirm",
+		"space to select",
+		"arrow keys to navigate",
+		"up/down to navigate",
+		"tab to navigate",
+	} {
+		if strings.Contains(screen, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPermissionRequest(screen string) bool {
+	for _, marker := range permissionMarkers {
+		if strings.Contains(screen, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (pw *ParserWriter) lastInputKindLocked() string {
+	cutoff := time.Now().Add(-2 * time.Second)
+	for len(pw.recentInput) > 0 && pw.recentInput[0].at.Before(cutoff) {
+		pw.recentInput = pw.recentInput[1:]
+	}
+	if len(pw.recentInput) == 0 {
+		return ""
+	}
+	return pw.recentInput[len(pw.recentInput)-1].kind
 }
 
 // Expects pw.mu to be held
@@ -107,25 +241,19 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 	// We allow a 2-second grace period after user typing.
 	isTypingGracePeriod := !pw.lastInputTime.IsZero() && time.Since(pw.lastInputTime) < 2*time.Second
 
-	// Replace carriage returns with newlines to normalize TUI line overwrites
+	// Replace carriage returns with newlines to normalize TUI line overwrites.
 	normalizedStr := strings.ReplaceAll(cleanStr, "\r", "\n")
-	lines := strings.Split(normalizedStr, "\n")
-
-	// Get the last 5 non-empty lines of visual output
-	var lastLines []string
-	for i := len(lines) - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed != "" {
-			lastLines = append([]string{trimmed}, lastLines...)
-			if len(lastLines) >= 5 {
-				break
-			}
-		}
-	}
+	lastLines := pw.recentVisibleLinesLocked()
 
 	if pw.isCodex() {
 		if pw.codexTitleSeen {
-			return !pw.codexTitleBusy
+			if !pw.codexTitleBusy {
+				return true
+			}
+			// A terminal-title update can be dropped while Codex redraws. The
+			// currently visible composer/footer is newer evidence than a stale
+			// spinner title, so let it end the running state.
+			return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
 		}
 		return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
 	}
@@ -137,6 +265,13 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		if strings.Contains(lastLine, "? for shortcuts") ||
 			strings.Contains(lastLine, "← for agents") ||
 			strings.Contains(lastLine, "ctrl-c again to exit") {
+			return true
+		}
+		trimmedLastLine := strings.TrimSpace(lastLines[len(lastLines)-1])
+		if strings.HasPrefix(trimmedLastLine, "❯") ||
+			strings.HasPrefix(trimmedLastLine, "User:") ||
+			strings.HasPrefix(trimmedLastLine, ">") ||
+			strings.HasPrefix(trimmedLastLine, "$") {
 			return true
 		}
 	}
@@ -200,16 +335,18 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		return true
 	}
 
-	// 2. If the entire trimmed output ends with standard prompt/question suffixes (like >, ?, $)
+	// 2. If we have no screen model, fall back to the raw output suffixes.
 	// We exclude : and ) here to prevent false positives from active output (like tool calls or timestamps)
 	suffixPatterns := []string{
 		">",
 		"?",
 		"$",
 	}
-	for _, pattern := range suffixPatterns {
-		if strings.HasSuffix(cleanStr, pattern) {
-			return true
+	if pw.terminal == nil {
+		for _, pattern := range suffixPatterns {
+			if strings.HasSuffix(cleanStr, pattern) {
+				return true
+			}
 		}
 	}
 
@@ -268,12 +405,7 @@ func codexIsIdle(lastLines []string, output string, typingGrace bool) bool {
 
 	for _, line := range lastLines {
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "do you want to proceed") ||
-			strings.Contains(lower, "allow once") ||
-			strings.Contains(lower, "allow for this session") ||
-			strings.Contains(lower, "approve this command") ||
-			strings.Contains(lower, "approval required") ||
-			strings.Contains(lower, "requires approval") ||
+		if hasPermissionRequest(lower) ||
 			strings.Contains(lower, "press enter to continue") ||
 			strings.HasPrefix(strings.TrimSpace(line), "›") {
 			return true
@@ -287,22 +419,57 @@ func (pw *ParserWriter) checkIdle() {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 
-	if pw.isCurrentlyIdleLocked() {
-		pw.setStatus(ipc.StatusWaiting)
-	} else {
-		pw.setStatus(ipc.StatusRunning)
+	pw.setStateLocked(pw.classifyLocked(), "screen-classifier")
+}
+
+func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
+	// Terminal TUIs frequently erase/redraw their approval menu immediately
+	// after painting it. Preserve a visible request through that brief redraw,
+	// but then accept the next non-permission state. This also handles approval
+	// methods (such as mouse clicks) that do not produce an Enter key event.
+	if pw.lastState == ipc.StatePermissionRequired && state != ipc.StatePermissionRequired {
+		if pw.lastInputKindLocked() == "enter" {
+			state = ipc.StatePermissionResolving
+			source = "permission-input"
+		} else if time.Since(pw.permissionShownAt) < time.Second {
+			return
+		}
+	}
+	if pw.lastState == ipc.StatePermissionResolving &&
+		state != ipc.StateRunning && state != ipc.StateExecutingTool && state != ipc.StatePermissionRequired {
+		return
+	}
+	if pw.lastState != state {
+		pw.lastState = state
+		if state == ipc.StatePermissionRequired {
+			pw.permissionShownAt = time.Now()
+		} else {
+			pw.permissionShownAt = time.Time{}
+		}
+		pw.sequence++
+		go sendEvent(pw.Client, ipc.AgentEvent{
+			SessionID:  pw.SessionID,
+			Agent:      pw.AgentName,
+			State:      state,
+			Sequence:   pw.sequence,
+			Confidence: 0.75,
+			Summary:    string(state),
+			Source:     source,
+		})
 	}
 }
 
-func (pw *ParserWriter) setStatus(status ipc.AgentStatus) {
-	if pw.lastStatus != status {
-		pw.lastStatus = status
-		go sendEvent(pw.Client, ipc.Event{
-			SessionID: pw.SessionID,
-			AgentName: pw.AgentName,
-			Status:    status,
-			Message:   string(status),
-		})
+func (pw *ParserWriter) setState(state ipc.AgentState, source string) {
+	pw.setStateWithSummary(state, string(state), source)
+}
+
+func (pw *ParserWriter) setStateWithSummary(state ipc.AgentState, summary, source string) {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	if pw.lastState != state {
+		pw.lastState = state
+		pw.sequence++
+		go sendEvent(pw.Client, ipc.AgentEvent{SessionID: pw.SessionID, Agent: pw.AgentName, State: state, Sequence: pw.sequence, Confidence: 1, Summary: summary, Source: source})
 	}
 }
 
@@ -332,9 +499,13 @@ func main() {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		sendEvent(client, ipc.Event{SessionID: sessionID, AgentName: agentName, Status: ipc.StatusRunning})
-		cmd.Run()
-		sendEvent(client, ipc.Event{SessionID: sessionID, AgentName: agentName, Status: ipc.StatusFinished})
+		sendEvent(client, ipc.AgentEvent{SessionID: sessionID, Agent: agentName, State: ipc.StateRunning, Confidence: 1, Source: "process-lifecycle"})
+		err := cmd.Run()
+		state, summary := ipc.StateCompleted, "Completed"
+		if err != nil {
+			state, summary = ipc.StateFailed, err.Error()
+		}
+		sendEvent(client, ipc.AgentEvent{SessionID: sessionID, Agent: agentName, State: state, Confidence: 1, Summary: summary, Source: "process-lifecycle"})
 		return
 	}
 	defer ptmx.Close()
@@ -360,11 +531,13 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		<-sig
-		sendEvent(client, ipc.Event{
-			SessionID: sessionID,
-			AgentName: agentName,
-			Status:    ipc.StatusFinished,
-			Message:   "Interrupted",
+		sendEvent(client, ipc.AgentEvent{
+			SessionID:  sessionID,
+			Agent:      agentName,
+			State:      ipc.StateFailed,
+			Confidence: 1,
+			Summary:    "Interrupted",
+			Source:     "process-lifecycle",
 		})
 		if oldState != nil {
 			term.Restore(int(os.Stdin.Fd()), oldState)
@@ -377,10 +550,11 @@ func main() {
 		Client:    client,
 		SessionID: sessionID,
 		AgentName: agentName,
+		terminal:  terminal.New(80, 24),
 	}
 
-	// Set initial initializing state
-	pw.setStatus(ipc.StatusInitializing)
+	// Set initial starting state.
+	pw.setState(ipc.StateStarting, "process-lifecycle")
 
 	// Copy stdin to pty, and pty to parser
 	// Copy stdin to pty with input tracking. If user types non-Enter keys,
@@ -408,6 +582,8 @@ func main() {
 				} else {
 					pw.lastInputTime = time.Now()
 				}
+				pw.recordInputLocked(buf[:n])
+				pw.setStateLocked(pw.classifyLocked(), "input-observation")
 				pw.mu.Unlock()
 
 				_, err = ptmx.Write(buf[:n])
@@ -418,14 +594,36 @@ func main() {
 		}
 	}()
 	io.Copy(pw, ptmx)
+	exitErr := cmd.Wait()
 
 	// Clean up when command finishes
-	sendEvent(client, ipc.Event{
-		SessionID: sessionID,
-		AgentName: agentName,
-		Status:    ipc.StatusFinished,
-		Message:   "Completed",
-	})
+	state, summary := ipc.StateCompleted, "Completed"
+	if exitErr != nil {
+		state, summary = ipc.StateFailed, exitErr.Error()
+	}
+	pw.setStateWithSummary(state, summary, "process-lifecycle")
+}
+
+// recordInputLocked only keeps coarse, short-lived categories. It never stores
+// the user's typed content or forwards it to the daemon.
+func (pw *ParserWriter) recordInputLocked(data []byte) {
+	kind := "text"
+	for _, b := range data {
+		switch b {
+		case '\r', '\n':
+			kind = "enter"
+		case 3:
+			kind = "interrupt"
+		case 9:
+			kind = "tab"
+		case 27:
+			kind = "escape"
+		}
+	}
+	pw.recentInput = append(pw.recentInput, inputRecord{kind: kind, at: time.Now()})
+	if len(pw.recentInput) > 16 {
+		pw.recentInput = pw.recentInput[len(pw.recentInput)-16:]
+	}
 }
 
 func isCodexInteractive(agentName string, args []string) bool {
