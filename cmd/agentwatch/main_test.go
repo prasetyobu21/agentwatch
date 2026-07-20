@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -156,6 +157,50 @@ func TestFreshCodexBusyTitleStartsRunningFromIdle(t *testing.T) {
 
 	if got := pw.classifyLocked(); got != ipc.StateRunning {
 		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
+	}
+}
+
+func TestNormalizeFocusInputKeepsAgentTUIFocused(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         []byte
+		wantForwarded []byte
+		wantUserInput []byte
+	}{
+		{
+			name:          "focus lost becomes focus gained",
+			input:         []byte("\x1b[O"),
+			wantForwarded: []byte("\x1b[I"),
+		},
+		{
+			name:          "focus gained is not user input",
+			input:         []byte("\x1b[I"),
+			wantForwarded: []byte("\x1b[I"),
+		},
+		{
+			name:          "mixed input preserves typed bytes",
+			input:         []byte("a\x1b[Ob"),
+			wantForwarded: []byte("a\x1b[Ib"),
+			wantUserInput: []byte("ab"),
+		},
+		{
+			name:          "other escape sequence is untouched",
+			input:         []byte("\x1b[A"),
+			wantForwarded: []byte("\x1b[A"),
+			wantUserInput: []byte("\x1b[A"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			forwarded, userInput := normalizeFocusInput(test.input)
+			if !bytes.Equal(forwarded, test.wantForwarded) {
+				t.Fatalf("forwarded = %q, want %q", forwarded, test.wantForwarded)
+			}
+			if !bytes.Equal(userInput, test.wantUserInput) {
+				t.Fatalf("userInput = %q, want %q", userInput, test.wantUserInput)
+			}
+		})
 	}
 }
 

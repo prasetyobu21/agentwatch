@@ -589,24 +589,27 @@ func main() {
 				break
 			}
 			if n > 0 {
-				pw.mu.Lock()
-				hasEnter := false
-				for i := 0; i < n; i++ {
-					if buf[i] == '\n' || buf[i] == '\r' {
-						hasEnter = true
-						break
+				forwardedInput, userInput := normalizeFocusInput(buf[:n])
+				if len(userInput) > 0 {
+					pw.mu.Lock()
+					hasEnter := false
+					for _, inputByte := range userInput {
+						if inputByte == '\n' || inputByte == '\r' {
+							hasEnter = true
+							break
+						}
 					}
+					if hasEnter {
+						pw.lastInputTime = time.Time{}
+					} else {
+						pw.lastInputTime = time.Now()
+					}
+					pw.recordInputLocked(userInput)
+					pw.setStateLocked(pw.classifyLocked(), "input-observation")
+					pw.mu.Unlock()
 				}
-				if hasEnter {
-					pw.lastInputTime = time.Time{}
-				} else {
-					pw.lastInputTime = time.Now()
-				}
-				pw.recordInputLocked(buf[:n])
-				pw.setStateLocked(pw.classifyLocked(), "input-observation")
-				pw.mu.Unlock()
 
-				_, err = ptmx.Write(buf[:n])
+				_, err = ptmx.Write(forwardedInput)
 				if err != nil {
 					break
 				}
@@ -622,6 +625,32 @@ func main() {
 		state, summary = ipc.StateFailed, exitErr.Error()
 	}
 	pw.setStateWithSummary(state, summary, "process-lifecycle")
+}
+
+// Coding-agent TUIs use terminal focus reporting to reduce redraws while the
+// terminal is in the background. Keep the child PTY logically focused so its
+// completion prompt is still emitted, while excluding those control bytes from
+// user-input classification.
+func normalizeFocusInput(data []byte) (forwarded, userInput []byte) {
+	focusIn := []byte{'\x1b', '[', 'I'}
+	focusOut := []byte{'\x1b', '[', 'O'}
+	if !bytes.Contains(data, focusIn) && !bytes.Contains(data, focusOut) {
+		return data, data
+	}
+
+	forwarded = make([]byte, 0, len(data))
+	userInput = make([]byte, 0, len(data))
+	for offset := 0; offset < len(data); {
+		if bytes.HasPrefix(data[offset:], focusIn) || bytes.HasPrefix(data[offset:], focusOut) {
+			forwarded = append(forwarded, focusIn...)
+			offset += len(focusIn)
+			continue
+		}
+		forwarded = append(forwarded, data[offset])
+		userInput = append(userInput, data[offset])
+		offset++
+	}
+	return forwarded, userInput
 }
 
 // recordInputLocked only keeps coarse, short-lived categories. It never stores
