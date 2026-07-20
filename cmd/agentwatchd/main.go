@@ -16,7 +16,10 @@ import (
 	"github.com/agentwatch/agentwatch/internal/ipc"
 )
 
-const eventHistorySize = 256
+const (
+	eventHistorySize        = 256
+	activeSessionStaleAfter = 30 * time.Minute
+)
 
 type Daemon struct {
 	mu           sync.Mutex
@@ -121,10 +124,21 @@ func (d *Daemon) cleanOrphans() {
 	d.mu.Lock()
 	var events []ipc.AgentEvent
 	for id, s := range d.sessions {
-		if s.State != ipc.StateCompleted && s.State != ipc.StateFailed && s.State != ipc.StateOrphaned && s.PID > 0 && !isProcessAlive(s.PID) {
+		terminal := s.State == ipc.StateCompleted || s.State == ipc.StateFailed || s.State == ipc.StateOrphaned
+		stale := !s.Timestamp.IsZero() && time.Since(s.Timestamp) > activeSessionStaleAfter
+		deadProcess := s.PID > 0 && !isProcessAlive(s.PID)
+		if !terminal && (deadProcess || stale) {
 			s.State = ipc.StateOrphaned
-			s.Summary = "Wrapper process terminated"
+			if stale {
+				s.Summary = "No state update for over 30 minutes"
+			} else {
+				s.Summary = "Wrapper process terminated"
+			}
 			s.Source = "daemon-lifecycle"
+			// Lifecycle events must advance the per-session sequence. Otherwise
+			// SSE clients discard this replacement for the stale running event.
+			s.Sequence++
+			s.Timestamp = time.Now()
 			d.sessions[id] = s
 			events = append(events, s)
 		}

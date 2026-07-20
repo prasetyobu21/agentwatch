@@ -224,9 +224,27 @@ struct NotchView: View {
     @State private var doneTimer: Timer? = nil
     
     var activeCount: Int {
+        activeSessions.count
+    }
+
+    private var activeSessions: [AgentSession] {
         daemonClient.sessions.values.filter {
             ["starting", "running", "executing_tool", "permission_resolving", "permission_required", "input_required"].contains($0.state)
-        }.count
+        }
+    }
+
+    // The notch must derive both its visibility and its icon from the same
+    // sessions. `globalStatus` is an aggregate convenience label and can lag
+    // behind an individual state update during SSE recovery.
+    private var activeIndicatorStatus: String {
+        let states = Set(activeSessions.map(\.state))
+        if states.contains("permission_required") || states.contains("input_required") {
+            return "Waiting"
+        }
+        if states.contains("starting") && !states.contains(where: { $0 != "starting" }) {
+            return "Initializing"
+        }
+        return "Running"
     }
 
     var permissionCount: Int {
@@ -271,7 +289,7 @@ struct NotchView: View {
                     HStack {
                         if isExpanded {
                             if activeCount > 0 {
-                                ProgressIcon(status: daemonClient.globalStatus)
+                                ProgressIcon(status: activeIndicatorStatus)
                                     .frame(width: 20, height: 20)
                                     .padding(.leading, 24)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
