@@ -118,6 +118,47 @@ func TestCodexReadyScreenOverridesStaleBusyTitle(t *testing.T) {
 	}
 }
 
+func TestAmbiguousFocusRedrawKeepsCodexIdle(t *testing.T) {
+	m := terminal.New(100, 10)
+	output := "\x1b]0;⠴ agentwatch\x07\n› Ask Codex anything\n? for shortcuts"
+	if err := m.Write([]byte(output)); err != nil {
+		t.Fatal(err)
+	}
+	pw := &ParserWriter{
+		AgentName:    "codex",
+		terminal:     m,
+		outputBuffer: []byte(output),
+		lastState:    ipc.StateIdle,
+	}
+	pw.updateCodexTitleLocked()
+
+	// Losing terminal focus can repaint the screen without the ready footer or
+	// a new title. The old spinner title must not reactivate an idle session.
+	pw.terminal = terminal.New(100, 10)
+	redraw := "agentwatch workspace"
+	if err := pw.terminal.Write([]byte(redraw)); err != nil {
+		t.Fatal(err)
+	}
+	pw.outputBuffer = append(pw.outputBuffer, []byte(redraw)...)
+	pw.updateCodexTitleLocked()
+
+	if got := pw.classifyLocked(); got != ipc.StateIdle {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateIdle)
+	}
+}
+
+func TestFreshCodexBusyTitleStartsRunningFromIdle(t *testing.T) {
+	pw := &ParserWriter{AgentName: "codex", lastState: ipc.StateIdle}
+	pw.outputBuffer = []byte("\x1b]0;agentwatch\x07")
+	pw.updateCodexTitleLocked()
+	pw.outputBuffer = []byte("\x1b]0;⠴ agentwatch\x07")
+	pw.updateCodexTitleLocked()
+
+	if got := pw.classifyLocked(); got != ipc.StateRunning {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
+	}
+}
+
 func TestIsCodexInteractive(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -66,6 +66,8 @@ type ParserWriter struct {
 	permissionShownAt time.Time
 	codexTitleSeen    bool
 	codexTitleBusy    bool
+	codexTitle        string
+	codexTitleChanged bool
 	terminal          *terminal.Model
 	recentInput       []inputRecord
 }
@@ -163,6 +165,21 @@ func (pw *ParserWriter) classifyLocked() ipc.AgentState {
 		if strings.Contains(recentScreen, marker) {
 			return ipc.StateRunning
 		}
+	}
+	// A Codex title is durable state, so an old spinner title can survive a
+	// later redraw that contains no activity. Only a newly changed busy title
+	// is evidence that an idle session started working again.
+	if pw.isCodex() && pw.codexTitleChanged && pw.codexTitleBusy {
+		return ipc.StateRunning
+	}
+	// Focus changes and other terminal events can repaint an idle TUI without
+	// its composer/footer. Do not turn that ambiguous redraw into activity. An
+	// Enter observed at the prompt is sufficient evidence of a submitted turn.
+	if pw.lastState == ipc.StateIdle {
+		if pw.lastInputKindLocked() == "enter" {
+			return ipc.StateRunning
+		}
+		return ipc.StateIdle
 	}
 	return ipc.StateRunning
 }
@@ -360,12 +377,15 @@ func (pw *ParserWriter) updateCodexTitleLocked() {
 	if !pw.isCodex() {
 		return
 	}
+	pw.codexTitleChanged = false
 	matches := codexTitleRegex.FindAllSubmatch(pw.outputBuffer, -1)
 	if len(matches) == 0 {
 		return
 	}
 	title := string(matches[len(matches)-1][1])
+	pw.codexTitleChanged = !pw.codexTitleSeen || title != pw.codexTitle
 	pw.codexTitleSeen = true
+	pw.codexTitle = title
 	pw.codexTitleBusy = brailleSpinnerRegex.MatchString(title)
 }
 
