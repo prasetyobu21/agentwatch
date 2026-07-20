@@ -521,7 +521,7 @@ func (pw *ParserWriter) deliverEvent(event ipc.AgentEvent) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: agentwatch <command> [args...]")
+		fmt.Println("Usage: aw <command> [args...]")
 		os.Exit(1)
 	}
 

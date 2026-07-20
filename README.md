@@ -55,9 +55,9 @@ The installer:
 - Builds the Go wrapper and daemon.
 - Builds the native SwiftUI application.
 - Installs `AgentWatch.app` in `/Applications`.
-- Installs the `agentwatch` command in `/opt/homebrew/bin`, `/usr/local/bin`, or `~/bin`, depending on the machine.
+- Installs the `aw` command in `/opt/homebrew/bin`, `/usr/local/bin`, or `~/bin`, depending on the machine.
 
-If the fallback `~/bin` location is used and `agentwatch` is not found, add it to the shell path:
+If the fallback `~/bin` location is used and `aw` is not found, add it to the shell path:
 
 ```bash
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
@@ -81,29 +81,29 @@ To start AgentWatch automatically after login:
 
 ## Use AgentWatch with an agent
 
-Keep the AgentWatch app running, then prefix the agent command with `agentwatch`:
+Keep the AgentWatch app running, then prefix the agent command with `aw`:
 
 ```bash
-agentwatch codex
-agentwatch claude
-agentwatch agy
+aw codex
+aw claude
+aw agy
 ```
 
 Arguments are passed through normally:
 
 ```bash
-agentwatch codex --model <model>
-agentwatch claude --continue
+aw codex --model <model>
+aw claude --continue
 ```
 
 You can also verify the installation with a simple command:
 
 ```bash
-agentwatch sleep 5
+aw sleep 5
 ```
 
 > [!IMPORTANT]
-> Automatic discovery of unwrapped terminal sessions is not implemented yet. Running `codex`, `claude`, or `agy` directly will not report detailed status to AgentWatch; start the session through `agentwatch`.
+> Automatic discovery of unwrapped terminal sessions is not implemented yet. Running `codex`, `claude`, or `agy` directly will not report detailed status to AgentWatch; start the session through `aw`.
 
 Interactive Codex sessions automatically use inline display mode so AgentWatch can reliably detect when Codex is ready for the next prompt.
 
@@ -139,19 +139,19 @@ For development or evaluation without copying files into `/Applications`:
 In another terminal:
 
 ```bash
-./bin/agentwatch codex
+./bin/aw codex
 ```
 
 Press `Ctrl+C` in the `start_all.sh` terminal to stop the development app and daemon.
 
 ## Troubleshooting
 
-### `agentwatch: command not found`
+### `aw: command not found`
 
 Locate the installed wrapper:
 
 ```bash
-ls -l /opt/homebrew/bin/agentwatch /usr/local/bin/agentwatch "$HOME/bin/agentwatch" 2>/dev/null
+ls -l /opt/homebrew/bin/aw /usr/local/bin/aw "$HOME/bin/aw" 2>/dev/null
 ```
 
 If it was installed in `~/bin`, add that directory to `PATH` using the instructions above.
@@ -172,7 +172,7 @@ If macOS blocks the locally built app, open **System Settings → Privacy & Secu
 Make sure:
 
 1. The eye icon is visible in the menu bar.
-2. The session was started with `agentwatch`, for example `agentwatch codex`.
+2. The session was started with `aw`, for example `aw codex`.
 3. Port `127.0.0.1:8765` is not already occupied by another program.
 
 Check the daemon snapshot:
@@ -193,12 +193,12 @@ The terminal application may independently retain visible content in its scrollb
 
 ```mermaid
 graph TD
-    A["CLI Wrapper (agentwatch)"] -- "state events" --> B["Local Daemon (agentwatchd)"]
+    A["CLI Wrapper (aw)"] -- "state events" --> B["Local Daemon (agentwatchd)"]
     C["macOS App (AgentWatch)"] -- "local status stream" --> B
     C -- "renders" --> D["Notch and Menu Bar"]
 ```
 
-1. **CLI wrapper (`agentwatch`):** Runs the requested command in a PTY, observes terminal activity, and emits normalized local state events.
+1. **CLI wrapper (`aw`):** Runs the requested command in a PTY, observes terminal activity, and emits normalized local state events.
 2. **Daemon (`agentwatchd`):** Coordinates sessions on `127.0.0.1:8765` and publishes snapshots and server-sent events.
 3. **macOS app (`AgentWatch`):** Starts the bundled daemon, consumes its local state stream, and renders the menu-bar and notch interfaces.
 
@@ -207,7 +207,7 @@ graph TD
 Build the Go binaries:
 
 ```bash
-go build -o bin/agentwatch ./cmd/agentwatch
+go build -o bin/aw ./cmd/agentwatch
 go build -o bin/agentwatchd ./cmd/agentwatchd
 ```
 
