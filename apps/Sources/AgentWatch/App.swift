@@ -270,10 +270,14 @@ struct NotchView: View {
     }
     
     var earWidth: CGFloat {
-        if attentionText != nil {
+        if permissionCount > 0 {
             // The permission label plus its trailing inset is wider than the
             // compact progress ear. Keep it fully outside the physical notch.
             return 220
+        } else if inputCount > 0 {
+            // Input requests use a shorter label and do not need the extra
+            // trailing space reserved for permission text.
+            return 150
         } else if showingDone {
             return 130
         } else if activeCount > 0 {
