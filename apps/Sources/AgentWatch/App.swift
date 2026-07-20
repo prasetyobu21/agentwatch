@@ -271,7 +271,9 @@ struct NotchView: View {
     
     var earWidth: CGFloat {
         if attentionText != nil {
-            return 170
+            // The permission label plus its trailing inset is wider than the
+            // compact progress ear. Keep it fully outside the physical notch.
+            return 220
         } else if showingDone {
             return 130
         } else if activeCount > 0 {
@@ -312,7 +314,6 @@ struct NotchView: View {
                     
                     // Right ear
                     HStack {
-                        Spacer(minLength: 0)
                         if isExpanded {
                             if let attentionText {
                                 Text(attentionText)
@@ -320,9 +321,11 @@ struct NotchView: View {
                                     .foregroundColor(permissionCount > 0 ? .yellow : .orange)
                                     .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
-                                    .padding(.trailing, 24)
+                                    .padding(.leading, 12)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
+                                Spacer(minLength: 0)
                             } else if showingDone {
+                                Spacer(minLength: 0)
                                 Text("\(doneCount) progress done")
                                     .font(.system(size: 14, weight: .semibold, design: .default))
                                     .foregroundColor(.green)
@@ -331,6 +334,8 @@ struct NotchView: View {
                                     .padding(.trailing, 24)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
                             }
+                        } else {
+                            Spacer(minLength: 0)
                         }
                     }
                     .frame(width: earWidth)
@@ -356,7 +361,6 @@ struct NotchView: View {
             previousSessions = daemonClient.sessions
         }
         .onChange(of: daemonClient.sessions) { newSessions in
-            var completedCount = 0
             for (id, session) in newSessions {
                 if let oldSession = previousSessions[id] {
                     let wasWorking = ["starting", "running", "executing_tool", "permission_resolving"].contains(oldSession.state)
@@ -370,24 +374,26 @@ struct NotchView: View {
                     let isDone = session.state == "completed" ||
                         (session.state == "idle" && session.source != "legacy-event")
                     if wasWorking && isDone {
-                        completedCount += 1
+                        // Approval TUIs can briefly paint an idle-looking
+                        // composer before their permission menu. Only announce
+                        // completion if this state survives the redraw.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            guard daemonClient.sessions[id]?.state == session.state else { return }
+                            doneCount += 1
+                            showingDone = true
+
+                            doneTimer?.invalidate()
+                            doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
+                                DispatchQueue.main.async {
+                                    self.showingDone = false
+                                    self.doneCount = 0
+                                }
+                            }
+                        }
                     }
                 }
             }
-            
-            if completedCount > 0 {
-                doneCount += completedCount
-                showingDone = true
-                
-                doneTimer?.invalidate()
-                doneTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in
-                    DispatchQueue.main.async {
-                        self.showingDone = false
-                        self.doneCount = 0
-                    }
-                }
-            }
-            
+
             previousSessions = newSessions
         }
     }

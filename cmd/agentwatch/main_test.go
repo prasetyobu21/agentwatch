@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/agentwatch/agentwatch/internal/ipc"
 	"github.com/agentwatch/agentwatch/internal/terminal"
@@ -37,6 +38,8 @@ func TestClassifierDistinguishesPermissionAndInput(t *testing.T) {
 		want         ipc.AgentState
 	}{
 		{"permission", "Do you want to proceed?\nAllow once\nDeny", ipc.StatePermissionRequired},
+		{"codex command permission", "Would you like to run the following command?\n1. Yes, proceed\n2. Yes, and don't ask again", ipc.StatePermissionRequired},
+		{"tool permission", "Would you like to allow this tool?\nAlways allow\nDeny", ipc.StatePermissionRequired},
 		{"ordinary question text", "Which environment should I use?", ipc.StateRunning},
 		{"ordinary request text", "Please provide a helper that validates input", ipc.StateRunning},
 		{"interactive question", "Which environment should I use?\n  1. Production\n  2. Staging\nEnter to select · ↑/↓ to navigate", ipc.StateInputRequired},
@@ -52,6 +55,18 @@ func TestClassifierDistinguishesPermissionAndInput(t *testing.T) {
 				t.Fatalf("classifyLocked() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestPromptSubmissionEnterIsNotApproval(t *testing.T) {
+	pw := &ParserWriter{
+		AgentName:    "codex",
+		outputBuffer: []byte("Would you like to run the following command?\nYes, proceed"),
+		lastState:    ipc.StateRunning,
+		recentInput:  []inputRecord{{kind: "enter", at: time.Now()}},
+	}
+	if got := pw.classifyLocked(); got != ipc.StatePermissionRequired {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StatePermissionRequired)
 	}
 }
 

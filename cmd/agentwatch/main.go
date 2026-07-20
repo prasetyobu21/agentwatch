@@ -78,6 +78,24 @@ type inputRecord struct {
 var ansiRegex = regexp.MustCompile(`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]?[\x30-\x7e]`)
 var codexTitleRegex = regexp.MustCompile(`\x1b\]0;([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 var brailleSpinnerRegex = regexp.MustCompile(`[⠁-⣿]`)
+var permissionMarkers = []string{
+	"allow once",
+	"allow for this session",
+	"always allow",
+	"allow this command",
+	"approve this command",
+	"approval required",
+	"requires approval",
+	"permission required",
+	"do you want to proceed",
+	"would you like to proceed",
+	"do you want to allow",
+	"would you like to allow",
+	"would you like to run the following command",
+	"yes, proceed",
+	"yes, and don't ask again",
+	"deny",
+}
 
 func (pw *ParserWriter) Write(p []byte) (n int, err error) {
 	// Always write to target (os.Stdout)
@@ -118,16 +136,11 @@ func (pw *ParserWriter) classifyLocked() ipc.AgentState {
 	}
 	recentScreen := strings.ToLower(strings.Join(pw.recentVisibleLinesLocked(), "\n"))
 	// A permission request is more urgent than an ordinary prompt and must win.
-	permission := []string{"allow once", "allow for this session", "approve this command", "approval required", "requires approval", "permission required", "deny", "do you want to proceed"}
-	hasPermission := false
-	for _, marker := range permission {
-		if strings.Contains(screen, marker) {
-			hasPermission = true
-			break
-		}
-	}
-	if hasPermission {
-		if pw.lastInputKindLocked() == "enter" {
+	if hasPermissionRequest(screen) {
+		// An Enter that submitted the user's original prompt is not an
+		// approval. Only interpret Enter as approval after the permission
+		// state has already been published and shown to the user.
+		if pw.lastState == ipc.StatePermissionRequired && pw.lastInputKindLocked() == "enter" {
 			return ipc.StatePermissionResolving
 		}
 		return ipc.StatePermissionRequired
@@ -189,6 +202,15 @@ func hasInputRequestUI(screen string) bool {
 		"up/down to navigate",
 		"tab to navigate",
 	} {
+		if strings.Contains(screen, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPermissionRequest(screen string) bool {
+	for _, marker := range permissionMarkers {
 		if strings.Contains(screen, marker) {
 			return true
 		}
@@ -383,12 +405,7 @@ func codexIsIdle(lastLines []string, output string, typingGrace bool) bool {
 
 	for _, line := range lastLines {
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "do you want to proceed") ||
-			strings.Contains(lower, "allow once") ||
-			strings.Contains(lower, "allow for this session") ||
-			strings.Contains(lower, "approve this command") ||
-			strings.Contains(lower, "approval required") ||
-			strings.Contains(lower, "requires approval") ||
+		if hasPermissionRequest(lower) ||
 			strings.Contains(lower, "press enter to continue") ||
 			strings.HasPrefix(strings.TrimSpace(line), "›") {
 			return true
