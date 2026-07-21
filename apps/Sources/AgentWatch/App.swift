@@ -206,16 +206,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         for display in selectedScreens {
-            let window = notchWindows[display.id] ?? makeNotchWindow()
+            let window: NSPanel
+            if let existingWindow = notchWindows[display.id] {
+                window = existingWindow
+                setNotchContent(of: window, for: display.screen)
+            } else {
+                window = makeNotchWindow(for: display.screen)
+            }
             position(window, on: display.screen)
             window.orderFrontRegardless()
             notchWindows[display.id] = window
         }
     }
 
-    private func makeNotchWindow() -> NSPanel {
+    private func makeNotchWindow(for screen: NSScreen) -> NSPanel {
         let width: CGFloat = 800 // Very wide to allow dynamic SwiftUI sizing without clipping
-        let height: CGFloat = 38 // Match the standard 38pt menu bar height on 16-inch Macs
+        let height = notchSize(for: screen).height
 
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -231,15 +237,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.ignoresMouseEvents = true
         
-        let contentView = NotchView(daemonClient: daemonClient)
-            .edgesIgnoringSafeArea(.all)
-        
-        let hostingView = NSHostingView(rootView: contentView)
+        setNotchContent(of: window, for: screen)
+        return window
+    }
+
+    private func setNotchContent(of window: NSPanel, for screen: NSScreen) {
+        let notchSize = notchSize(for: screen)
+        window.setContentSize(NSSize(width: 800, height: notchSize.height))
+        let hostingView = NSHostingView(rootView: NotchView(daemonClient: daemonClient, notchWidth: notchSize.width, notchHeight: notchSize.height).edgesIgnoringSafeArea(.all))
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
-        
         window.contentView = hostingView
-        return window
+    }
+
+    private func notchSize(for screen: NSScreen) -> CGSize {
+        let width: CGFloat
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            width = max(0, right.minX - left.maxX)
+        } else {
+            width = 210
+        }
+        return CGSize(width: width, height: screen.safeAreaInsets.top > 0 ? screen.safeAreaInsets.top : 38)
     }
 
     private func position(_ window: NSPanel, on screen: NSScreen) {
@@ -294,6 +312,8 @@ final class DisplayManager: ObservableObject {
 
 struct NotchView: View {
     @ObservedObject var daemonClient: DaemonClient
+    let notchWidth: CGFloat
+    let notchHeight: CGFloat
     
     @State private var previousSessions: [String: AgentSession] = [:]
     @State private var showingDone: Bool = false
@@ -400,7 +420,7 @@ struct NotchView: View {
                     
                     // The physical hardware notch gap (always dead center)
                     Color.clear
-                        .frame(width: 220, height: 38)
+                        .frame(width: notchWidth, height: notchHeight)
                     
                     // Right ear
                     HStack {
@@ -431,7 +451,7 @@ struct NotchView: View {
                     .frame(width: earWidth)
                     .clipped()
                 }
-                .frame(height: 38)
+                .frame(height: notchHeight)
                 .background(Color.black)
                 .clipShape(UnevenRoundedRectangle(
                     topLeadingRadius: 0,
