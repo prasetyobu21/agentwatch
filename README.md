@@ -14,6 +14,7 @@ AgentWatch is a lightweight, real-time activity tracker for CLI-based AI coding 
 - Distinguishes starting, running, tool execution, permission, input, completion, failure, and orphaned states.
 - Shows permission and input attention indicators in the notch.
 - Recognizes Codex's terminal-title activity signal and interactive composer.
+- Tracks ordinary Codex and Claude launches through lifecycle hooks.
 - Preserves interactive terminal behavior through a pseudo-terminal (PTY).
 - Runs locally without sending prompts or terminal output to an external AgentWatch service.
 
@@ -52,7 +53,7 @@ cd agentwatch
 
 The installer:
 
-- Builds the Go wrapper and daemon.
+- Builds the Go CLI and daemon.
 - Builds the native SwiftUI application.
 - Installs `AgentWatch.app` in `/Applications`.
 - Installs the `aw` command in `/opt/homebrew/bin`, `/usr/local/bin`, or `~/bin`, depending on the machine.
@@ -79,31 +80,58 @@ To start AgentWatch automatically after login:
 1. Open **System Settings → General → Login Items**.
 2. Add `/Applications/AgentWatch.app` under **Open at Login**.
 
-## Use AgentWatch with an agent
+## Install agent hooks
 
-Keep the AgentWatch app running, then prefix the agent command with `aw`:
+Hook installation is an explicit second step so AgentWatch never changes agent
+configuration during `./install.sh`:
 
 ```bash
-aw codex
-aw claude
+aw hooks install all
+```
+
+Install only one integration if preferred:
+
+```bash
+aw hooks install codex
+aw hooks install claude
+```
+
+The command changes only these hook sections:
+
+- Codex: `~/.codex/hooks.json`
+- Claude: `~/.claude/settings.json`
+
+Existing settings are preserved. Before changing an existing file, AgentWatch
+creates an adjacent `.agentwatch.bak` once. The hooks observe lifecycle events,
+never return allow/deny decisions, and quietly exit if AgentWatch is not running.
+
+Start a new Codex or Claude session after installing. If Codex asks you to
+review the new commands, open `/hooks` and trust the AgentWatch entries.
+
+## Use AgentWatch with an agent
+
+Keep AgentWatch running and launch Codex or Claude normally—no wrapper:
+
+```bash
+codex
+claude
+```
+
+Antigravity does not expose the same hooks yet, so continue using the wrapper:
+
+```bash
 aw agy
 ```
 
-Arguments are passed through normally:
+Arguments are passed directly to each agent:
 
 ```bash
-aw codex --model <model>
-aw claude --continue
+codex --model <model>
+claude --continue
 ```
 
-You can also verify the installation with a simple command:
-
-```bash
-aw sleep 5
-```
-
-> [!IMPORTANT]
-> Automatic discovery of unwrapped terminal sessions is not implemented yet. Running `codex`, `claude`, or `agy` directly will not report detailed status to AgentWatch; start the session through `aw`.
+The PTY wrapper remains available as a fallback. Wrapped Codex and Claude
+sessions automatically suppress their hook events to avoid duplicate entries.
 
 Interactive Codex sessions automatically use inline display mode so AgentWatch can reliably detect when Codex is ready for the next prompt.
 
@@ -124,6 +152,7 @@ Quit the currently running AgentWatch app from its menu-bar dropdown. Then, from
 ```bash
 git pull
 ./install.sh
+aw hooks install all
 open -a AgentWatch
 ```
 
@@ -136,10 +165,11 @@ For development or evaluation without copying files into `/Applications`:
 ./start_all.sh
 ```
 
-In another terminal:
+Install hooks that point to the development binary, then launch an agent normally:
 
 ```bash
-./bin/aw codex
+./bin/aw hooks install all
+codex
 ```
 
 Press `Ctrl+C` in the `start_all.sh` terminal to stop the development app and daemon.
@@ -172,8 +202,9 @@ If macOS blocks the locally built app, open **System Settings → Privacy & Secu
 Make sure:
 
 1. The eye icon is visible in the menu bar.
-2. The session was started with `aw`, for example `aw codex`.
-3. Port `127.0.0.1:8765` is not already occupied by another program.
+2. Hooks were installed with `aw hooks install all` and the agent was restarted.
+3. Codex or Claude was launched directly; Antigravity was launched with `aw agy`.
+4. Port `127.0.0.1:8765` is not already occupied by another program.
 
 Check the daemon snapshot:
 
@@ -183,7 +214,15 @@ curl http://127.0.0.1:8765/v1/status
 
 ## Privacy and local data handling
 
-AgentWatch does not send prompts, typed input, terminal output, or state data to an external AgentWatch API. The wrapper temporarily examines a small recent-output buffer and terminal-screen model in memory to classify activity. It records only short-lived input categories such as `text`, `enter`, or `escape`, not the characters typed.
+AgentWatch does not send prompts, typed input, terminal output, or state data to
+an external AgentWatch API. Hooks forward only normalized lifecycle metadata,
+such as session ID, state, and tool name. Prompt text, tool arguments, responses,
+and transcript contents are ignored.
+
+The fallback wrapper temporarily examines a small recent-output buffer and
+terminal-screen model in memory to classify activity. It records only
+short-lived input categories such as `text`, `enter`, or `escape`, not the
+characters typed.
 
 The daemon receives normalized state metadata and retains current sessions plus a limited event history in memory. It listens only on `127.0.0.1:8765`, so it is not exposed to other devices on the network. The local HTTP API is currently unauthenticated, which means another process already running on the same Mac could read or spoof state metadata. Raw prompts and terminal output are not available through this API.
 
@@ -193,14 +232,16 @@ The terminal application may independently retain visible content in its scrollb
 
 ```mermaid
 graph TD
-    A["CLI Wrapper (aw)"] -- "state events" --> B["Local Daemon (agentwatchd)"]
+    A["Codex and Claude hooks"] -- "structured lifecycle events" --> B["Local Daemon (agentwatchd)"]
+    E["CLI Wrapper (aw fallback)"] -- "state events" --> B
     C["macOS App (AgentWatch)"] -- "local status stream" --> B
     C -- "renders" --> D["Notch and Menu Bar"]
 ```
 
-1. **CLI wrapper (`aw`):** Runs the requested command in a PTY, observes terminal activity, and emits normalized local state events.
-2. **Daemon (`agentwatchd`):** Coordinates sessions on `127.0.0.1:8765` and publishes snapshots and server-sent events.
-3. **macOS app (`AgentWatch`):** Starts the bundled daemon, consumes its local state stream, and renders the menu-bar and notch interfaces.
+1. **Hooks:** Codex and Claude invoke the local `aw hook` relay, which emits normalized state metadata and always returns without making permission decisions.
+2. **CLI wrapper (`aw`):** Provides PTY-based tracking for agents without supported hooks and remains available as a fallback.
+3. **Daemon (`agentwatchd`):** Coordinates sessions on `127.0.0.1:8765` and publishes snapshots and server-sent events.
+4. **macOS app (`AgentWatch`):** Starts the bundled daemon, consumes its local state stream, and renders the menu-bar and notch interfaces.
 
 ## Build components manually
 

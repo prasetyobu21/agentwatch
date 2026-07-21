@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,7 +25,11 @@ import (
 )
 
 func sendEvent(client *http.Client, event ipc.AgentEvent) {
-	event.PID = os.Getpid()
+	postEvent(client, event, os.Getpid())
+}
+
+func postEvent(client *http.Client, event ipc.AgentEvent, pid int) {
+	event.PID = pid
 	if event.Version == 0 {
 		event.Version = 1
 	}
@@ -49,6 +55,221 @@ func sendEvent(client *http.Client, event ipc.AgentEvent) {
 		return
 	}
 	defer resp.Body.Close()
+}
+
+type hookInput struct {
+	SessionID        string `json:"session_id"`
+	HookEventName    string `json:"hook_event_name"`
+	ToolName         string `json:"tool_name"`
+	NotificationType string `json:"notification_type"`
+}
+
+func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
+	if input.SessionID == "" {
+		return ipc.AgentEvent{}, false
+	}
+	event := ipc.AgentEvent{
+		SessionID:  agent + ":" + input.SessionID,
+		Agent:      agent,
+		Confidence: 1,
+		Source:     agent + "-hook",
+	}
+	switch input.HookEventName {
+	case "SessionStart":
+		event.State, event.Summary = ipc.StateIdle, "Ready"
+	case "UserPromptSubmit":
+		event.State, event.Summary = ipc.StateRunning, "Running"
+	case "PreToolUse":
+		event.Tool = input.ToolName
+		if input.ToolName == "AskUserQuestion" || input.ToolName == "request_user_input" {
+			event.State, event.Summary = ipc.StateInputRequired, "Input required"
+		} else {
+			event.State, event.Summary = ipc.StateExecutingTool, input.ToolName
+		}
+	case "PermissionRequest":
+		event.State, event.Summary, event.Tool = ipc.StatePermissionRequired, "Permission required", input.ToolName
+	case "PostToolUse", "PostToolUseFailure":
+		event.State, event.Summary, event.Tool = ipc.StateRunning, "Running", input.ToolName
+	case "Stop":
+		event.State, event.Summary = ipc.StateIdle, "Turn complete"
+	case "StopFailure":
+		event.State, event.Summary = ipc.StateFailed, "Turn failed"
+	case "SessionEnd":
+		event.State, event.Summary = ipc.StateCompleted, "Session ended"
+	case "Notification":
+		switch input.NotificationType {
+		case "permission_prompt":
+			event.State, event.Summary = ipc.StatePermissionRequired, "Permission required"
+		case "idle_prompt", "agent_needs_input":
+			event.State, event.Summary = ipc.StateInputRequired, "Input required"
+		case "agent_completed":
+			event.State, event.Summary = ipc.StateIdle, "Turn complete"
+		default:
+			return ipc.AgentEvent{}, false
+		}
+	default:
+		return ipc.AgentEvent{}, false
+	}
+	return event, true
+}
+
+func relayHook(agent string, input io.Reader, client *http.Client) {
+	if os.Getenv("AGENTWATCH_WRAPPED") == "1" || (agent != "codex" && agent != "claude") {
+		return
+	}
+	var payload hookInput
+	if json.NewDecoder(io.LimitReader(input, 1<<20)).Decode(&payload) != nil {
+		return
+	}
+	if event, ok := hookEvent(agent, payload); ok {
+		// Hook processes are short-lived. A zero PID prevents the daemon from
+		// treating their sessions as orphaned as soon as the hook exits.
+		postEvent(client, event, 0)
+	}
+}
+
+var hookEvents = map[string][]string{
+	"codex":  {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"},
+	"claude": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "StopFailure", "SessionEnd"},
+}
+
+func hookGroup(agent, executable string) map[string]any {
+	handler := map[string]any{"type": "command", "timeout": 1}
+	if agent == "claude" {
+		handler["command"] = executable
+		handler["args"] = []string{"hook", agent}
+	} else {
+		handler["command"] = shellQuote(executable) + " hook " + agent
+	}
+	return map[string]any{"hooks": []any{handler}}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func installHooks(path, agent, executable string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if len(data) == 0 {
+		data = []byte("{}")
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return "", fmt.Errorf("refusing to modify invalid JSON: %w", err)
+	}
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok {
+		if root["hooks"] != nil {
+			return "", errors.New("refusing to replace non-object hooks setting")
+		}
+		hooks = map[string]any{}
+		root["hooks"] = hooks
+	}
+	for _, event := range hookEvents[agent] {
+		groups, ok := hooks[event].([]any)
+		if !ok && hooks[event] != nil {
+			return "", fmt.Errorf("refusing to replace non-array hooks.%s", event)
+		}
+		if !hasAgentWatchHook(groups, agent, executable) {
+			hooks[event] = append(groups, hookGroup(agent, executable))
+		}
+	}
+	updated, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	updated = append(updated, '\n')
+	if bytes.Equal(data, updated) {
+		return "", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", err
+	}
+	backup := ""
+	if _, err := os.Stat(path); err == nil {
+		backupPath := path + ".agentwatch.bak"
+		if _, backupErr := os.Stat(backupPath); errors.Is(backupErr, os.ErrNotExist) {
+			if err := os.WriteFile(backupPath, data, 0600); err != nil {
+				return "", err
+			}
+			backup = backupPath
+		}
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".agentwatch-hooks-*")
+	if err != nil {
+		return "", err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err = temp.Chmod(0600); err == nil {
+		_, err = temp.Write(updated)
+	}
+	if closeErr := temp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", err
+	}
+	return backup, os.Rename(tempPath, path)
+}
+
+func hasAgentWatchHook(groups []any, agent, executable string) bool {
+	for _, rawGroup := range groups {
+		group, _ := rawGroup.(map[string]any)
+		handlers, _ := group["hooks"].([]any)
+		for _, rawHandler := range handlers {
+			handler, _ := rawHandler.(map[string]any)
+			command, _ := handler["command"].(string)
+			if agent == "codex" && command == shellQuote(executable)+" hook codex" {
+				return true
+			}
+			args, _ := handler["args"].([]any)
+			if agent == "claude" && command == executable && len(args) == 2 && args[0] == "hook" && args[1] == "claude" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func runHooksCommand(args []string) error {
+	if len(args) != 2 || args[0] != "install" || (args[1] != "codex" && args[1] != "claude" && args[1] != "all") {
+		return errors.New("usage: aw hooks install <codex|claude|all>")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	agents := []string{args[1]}
+	if args[1] == "all" {
+		agents = []string{"codex", "claude"}
+	}
+	for _, agent := range agents {
+		path := filepath.Join(home, "."+agent, "hooks.json")
+		if agent == "claude" {
+			path = filepath.Join(home, ".claude", "settings.json")
+		}
+		backup, err := installHooks(path, agent, executable)
+		if err != nil {
+			return fmt.Errorf("%s: %w", agent, err)
+		}
+		fmt.Printf("%s hooks installed in %s\n", agent, path)
+		if backup != "" {
+			fmt.Printf("backup: %s\n", backup)
+		}
+	}
+	return nil
 }
 
 type ParserWriter struct {
@@ -544,8 +765,21 @@ func (pw *ParserWriter) deliverEvent(event ipc.AgentEvent) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: aw <command> [args...]")
+		fmt.Println("Usage: aw <command> [args...] | aw hooks install <codex|claude|all>")
 		os.Exit(1)
+	}
+	if os.Args[1] == "hook" {
+		if len(os.Args) == 3 {
+			relayHook(os.Args[2], os.Stdin, &http.Client{Timeout: 300 * time.Millisecond})
+		}
+		return
+	}
+	if os.Args[1] == "hooks" {
+		if err := runHooksCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	agentName := os.Args[1]
@@ -560,6 +794,10 @@ func main() {
 	sessionID := fmt.Sprintf("%s-%d", agentName, time.Now().Unix())
 
 	cmd := exec.Command(agentName, args...)
+	wrappedAgent := strings.ToLower(filepath.Base(agentName))
+	if wrappedAgent == "codex" || wrappedAgent == "claude" {
+		cmd.Env = append(os.Environ(), "AGENTWATCH_WRAPPED=1")
+	}
 
 	// Start with PTY
 	ptmx, err := pty.Start(cmd)

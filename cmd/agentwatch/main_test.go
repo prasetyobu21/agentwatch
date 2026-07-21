@@ -2,12 +2,111 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/agentwatch/agentwatch/internal/ipc"
 	"github.com/agentwatch/agentwatch/internal/terminal"
 )
+
+func TestHookEventMapping(t *testing.T) {
+	tests := []struct {
+		name  string
+		input hookInput
+		state ipc.AgentState
+		ok    bool
+	}{
+		{name: "start", input: hookInput{SessionID: "one", HookEventName: "SessionStart"}, state: ipc.StateIdle, ok: true},
+		{name: "tool", input: hookInput{SessionID: "one", HookEventName: "PreToolUse", ToolName: "Bash"}, state: ipc.StateExecutingTool, ok: true},
+		{name: "question", input: hookInput{SessionID: "one", HookEventName: "PreToolUse", ToolName: "AskUserQuestion"}, state: ipc.StateInputRequired, ok: true},
+		{name: "permission", input: hookInput{SessionID: "one", HookEventName: "PermissionRequest"}, state: ipc.StatePermissionRequired, ok: true},
+		{name: "stop", input: hookInput{SessionID: "one", HookEventName: "Stop"}, state: ipc.StateIdle, ok: true},
+		{name: "unknown", input: hookInput{SessionID: "one", HookEventName: "Other"}},
+		{name: "missing session", input: hookInput{HookEventName: "Stop"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event, ok := hookEvent("claude", test.input)
+			if ok != test.ok || event.State != test.state {
+				t.Fatalf("hookEvent() = (%q, %v), want (%q, %v)", event.State, ok, test.state, test.ok)
+			}
+			if ok && (event.SessionID != "claude:one" || event.PID != 0) {
+				t.Fatalf("event = %#v", event)
+			}
+		})
+	}
+}
+
+func TestInstallHooksPreservesSettingsAndIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	original := []byte("{\n  \"permissions\": {\"allow\": [\"Read\"]},\n  \"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"existing\"}]}]}\n}\n")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := installHooks(path, "claude", "/tmp/aw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup == "" {
+		t.Fatal("expected backup")
+	}
+	backupData, err := os.ReadFile(backup)
+	if err != nil || !bytes.Equal(backupData, original) {
+		t.Fatalf("backup changed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root["permissions"] == nil {
+		t.Fatal("existing settings were removed")
+	}
+	hooks := root["hooks"].(map[string]any)
+	if got := len(hooks["Stop"].([]any)); got != 2 {
+		t.Fatalf("Stop hook count = %d, want 2", got)
+	}
+	if _, err := installHooks(path, "claude", "/tmp/aw"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	json.Unmarshal(data, &root)
+	hooks = root["hooks"].(map[string]any)
+	if got := len(hooks["Stop"].([]any)); got != 2 {
+		t.Fatalf("idempotent Stop hook count = %d, want 2", got)
+	}
+}
+
+func TestInstallHooksRefusesInvalidSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte("not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installHooks(path, "claude", "/tmp/aw"); err == nil {
+		t.Fatal("expected invalid JSON error")
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "not json" {
+		t.Fatal("invalid settings file was modified")
+	}
+}
+
+func TestInstallHooksDoesNotClaimBackupForNewFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	backup, err := installHooks(path, "codex", "/tmp/aw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup != "" {
+		t.Fatalf("backup = %q for new file", backup)
+	}
+}
 
 func TestCodexIdleDetection(t *testing.T) {
 	tests := []struct {
