@@ -69,6 +69,7 @@ type ParserWriter struct {
 	codexTitleBusy    bool
 	codexTitle        string
 	codexTitleChanged bool
+	claudeBusySeen    bool
 	terminal          *terminal.Model
 	recentInput       []inputRecord
 }
@@ -139,7 +140,13 @@ func (pw *ParserWriter) classifyLocked() ipc.AgentState {
 	}
 	recentScreen := strings.ToLower(strings.Join(pw.recentVisibleLinesLocked(), "\n"))
 	// A permission request is more urgent than an ordinary prompt and must win.
-	if hasPermissionRequest(screen) {
+	permissionScreen := screen
+	if pw.isClaude() {
+		// Claude keeps prior tool output on screen; only its current bottom
+		// region can contain an actionable approval menu.
+		permissionScreen = recentScreen
+	}
+	if hasPermissionRequest(permissionScreen) {
 		// An Enter that submitted the user's original prompt is not an
 		// approval. Only interpret Enter as approval after the permission
 		// state has already been published and shown to the user.
@@ -153,6 +160,15 @@ func (pw *ParserWriter) classifyLocked() ipc.AgentState {
 	// that tells the user how to answer an AskUserQuestion-style prompt.
 	if hasInputRequestUI(recentScreen) {
 		return ipc.StateInputRequired
+	}
+	if pw.isClaude() {
+		if hasClaudeBusyIndicator(screen) {
+			pw.claudeBusySeen = true
+			return ipc.StateRunning
+		}
+		if pw.claudeBusySeen {
+			return ipc.StateIdle
+		}
 	}
 	if pw.isCurrentlyIdleLocked() {
 		return ipc.StateIdle
@@ -271,7 +287,6 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 		}
 		return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
 	}
-
 	// First, check if the very last line of visual output displays an idle status bar indicator.
 	// If it does, the agent is definitely waiting/idle, overriding any older busy indicators in history.
 	if len(lastLines) > 0 {
@@ -391,6 +406,15 @@ func (pw *ParserWriter) isCodex() bool {
 	return name == "codex" || strings.HasSuffix(name, "/codex")
 }
 
+func (pw *ParserWriter) isClaude() bool {
+	name := strings.ToLower(strings.TrimSpace(pw.AgentName))
+	return name == "claude" || strings.HasSuffix(name, "/claude")
+}
+
+func hasClaudeBusyIndicator(screen string) bool {
+	return strings.Contains(screen, "esc to interrupt") || strings.Contains(screen, "esc to cancel")
+}
+
 // codexIsIdle follows the same ordering as the Claude/Antigravity parser:
 // Codex's ready footer is authoritative, then current activity wins over an
 // older composer line retained in the PTY buffer.
@@ -458,6 +482,9 @@ func (pw *ParserWriter) setStateLocked(state ipc.AgentState, source string) {
 	}
 	if pw.lastState != state {
 		pw.lastState = state
+		if state == ipc.StateIdle {
+			pw.claudeBusySeen = false
+		}
 		if state == ipc.StatePermissionRequired {
 			pw.permissionShownAt = time.Now()
 		} else {

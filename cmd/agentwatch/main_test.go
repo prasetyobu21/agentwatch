@@ -78,15 +78,39 @@ func TestNonCodexComposerIsNotTreatedAsIdle(t *testing.T) {
 	}
 }
 
-func TestClaudePromptWinsOverOlderActivityOnScreen(t *testing.T) {
+func TestClaudeInterruptIndicatorKeepsRunning(t *testing.T) {
 	m := terminal.New(100, 10)
-	output := "✻ Working…\nCompleted a change\n❯"
+	output := "✻ Working… · esc to interrupt\nline 1\nline 2\nline 3\nline 4\nline 5\n⏵⏵ auto mode on · ← for agents"
 	if err := m.Write([]byte(output)); err != nil {
 		t.Fatal(err)
 	}
 	pw := &ParserWriter{AgentName: "claude", terminal: m, outputBuffer: []byte(output)}
+	if got := pw.classifyLocked(); got != ipc.StateRunning {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
+	}
+}
+
+func TestClaudeInterruptDisappearingMarksIdle(t *testing.T) {
+	m := terminal.New(100, 10)
+	output := "✻ Working…\n❯ Try \"fix lint errors\""
+	if err := m.Write([]byte(output)); err != nil {
+		t.Fatal(err)
+	}
+	pw := &ParserWriter{AgentName: "claude", terminal: m, outputBuffer: []byte(output), claudeBusySeen: true}
 	if got := pw.classifyLocked(); got != ipc.StateIdle {
 		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateIdle)
+	}
+}
+
+func TestClaudeOldPermissionTextDoesNotTriggerAlert(t *testing.T) {
+	m := terminal.New(100, 10)
+	output := "Allow once\nline 1\nline 2\nline 3\nline 4\nline 5\n✻ Working… · esc to interrupt"
+	if err := m.Write([]byte(output)); err != nil {
+		t.Fatal(err)
+	}
+	pw := &ParserWriter{AgentName: "claude", terminal: m, outputBuffer: []byte(output)}
+	if got := pw.classifyLocked(); got != ipc.StateRunning {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
 	}
 }
 

@@ -379,10 +379,10 @@ struct NotchView: View {
             // Input requests use a shorter label and do not need the extra
             // trailing space reserved for permission text.
             return 150
-        } else if showingDone {
-            return 130
         } else if activeCount > 0 {
             return 60
+        } else if showingDone {
+            return 130
         } else {
             return 0
         }
@@ -405,7 +405,7 @@ struct NotchView: View {
                                     .frame(width: 20, height: 20)
                                     .padding(.leading, 24)
                                     .transition(.opacity.animation(.easeIn(duration: 0.2).delay(0.1)))
-                            } else if showingDone {
+                            } else if showingDone && activeCount == 0 {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.green)
                                     .frame(width: 20, height: 20)
