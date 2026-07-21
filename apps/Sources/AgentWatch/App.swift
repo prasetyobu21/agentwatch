@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreGraphics
 
 @main
 struct AgentWatchApp: App {
@@ -100,16 +101,30 @@ struct AgentWatchApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var notchWindow: NSPanel!
+    private var notchWindows: [String: NSPanel] = [:]
     var daemonClient = DaemonClient()
+    let displayManager = DisplayManager()
     private var daemonProcess: Process? = nil
+    private var screenParametersObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startDaemonIfNeeded()
-        setupNotchWindow()
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.displayManager.refreshDisplays()
+            self?.updateNotchWindows()
+        }
+        displayManager.refreshDisplays()
+        updateNotchWindows()
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
         daemonProcess?.terminate()
     }
     
@@ -180,28 +195,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         URLSession.shared.dataTask(with: request).resume()
     }
 
-    func setupNotchWindow() {
-        let screenWidth = NSScreen.main?.frame.width ?? 1440
-        let screenHeight = NSScreen.main?.frame.height ?? 900
-        
+    private func updateNotchWindows() {
+        let selectedScreens = displayManager.selectedScreens
+        let selectedIDs = Set(selectedScreens.map(\.id))
+
+        let staleIDs = notchWindows.keys.filter { !selectedIDs.contains($0) }
+        for id in staleIDs {
+            notchWindows[id]?.orderOut(nil)
+            notchWindows.removeValue(forKey: id)
+        }
+
+        for display in selectedScreens {
+            let window = notchWindows[display.id] ?? makeNotchWindow()
+            position(window, on: display.screen)
+            window.orderFrontRegardless()
+            notchWindows[display.id] = window
+        }
+    }
+
+    private func makeNotchWindow() -> NSPanel {
         let width: CGFloat = 800 // Very wide to allow dynamic SwiftUI sizing without clipping
         let height: CGFloat = 38 // Match the standard 38pt menu bar height on 16-inch Macs
-        
-        let rect = NSRect(x: (screenWidth - width) / 2, y: screenHeight - height, width: width, height: height)
-        
-        notchWindow = NSPanel(
-            contentRect: rect,
+
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        
-        notchWindow.isOpaque = false
-        notchWindow.backgroundColor = .clear
-        notchWindow.hasShadow = false
-        notchWindow.level = .mainMenu + 2
-        notchWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        notchWindow.ignoresMouseEvents = true
+
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = .mainMenu + 2
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.ignoresMouseEvents = true
         
         let contentView = NotchView(daemonClient: daemonClient)
             .edgesIgnoringSafeArea(.all)
@@ -210,8 +238,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         
-        notchWindow.contentView = hostingView
-        notchWindow.makeKeyAndOrderFront(nil)
+        window.contentView = hostingView
+        return window
+    }
+
+    private func position(_ window: NSPanel, on screen: NSScreen) {
+        let screenFrame = screen.frame
+        let windowSize = window.frame.size
+        let origin = NSPoint(
+            x: screenFrame.midX - windowSize.width / 2,
+            y: screenFrame.maxY - windowSize.height
+        )
+        window.setFrameOrigin(origin)
+    }
+}
+
+struct DisplayInfo: Identifiable {
+    let id: String
+    let name: String
+    let isBuiltIn: Bool
+    let screen: NSScreen
+}
+
+final class DisplayManager: ObservableObject {
+    @Published private(set) var displays: [DisplayInfo] = []
+
+    var selectedScreens: [DisplayInfo] {
+        // For now the notch belongs exclusively to the Mac's physical panel.
+        // Never fall back to an external display when the built-in display is
+        // unavailable (for example, while a MacBook is used in clamshell mode).
+        displays.filter(\.isBuiltIn)
+    }
+
+    func refreshDisplays() {
+        displays = NSScreen.screens.map { screen in
+            let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            let displayID = CGDirectDisplayID(screenNumber?.uint32Value ?? 0)
+            return DisplayInfo(
+                id: Self.stableID(for: displayID),
+                name: screen.localizedName,
+                isBuiltIn: CGDisplayIsBuiltin(displayID) != 0,
+                screen: screen
+            )
+        }
+
+    }
+
+    private static func stableID(for displayID: CGDirectDisplayID) -> String {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else {
+            return String(displayID)
+        }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 }
 
