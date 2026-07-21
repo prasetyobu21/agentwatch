@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -58,10 +59,16 @@ func postEvent(client *http.Client, event ipc.AgentEvent, pid int) {
 }
 
 type hookInput struct {
-	SessionID        string `json:"session_id"`
-	HookEventName    string `json:"hook_event_name"`
-	ToolName         string `json:"tool_name"`
-	NotificationType string `json:"notification_type"`
+	SessionID         string `json:"session_id"`
+	ConversationID    string `json:"conversationId"`
+	HookEventName     string `json:"hook_event_name"`
+	ToolName          string `json:"tool_name"`
+	NotificationType  string `json:"notification_type"`
+	TerminationReason string `json:"terminationReason"`
+	Error             string `json:"error"`
+	ToolCall          struct {
+		Name string `json:"name"`
+	} `json:"toolCall"`
 }
 
 func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
@@ -75,6 +82,8 @@ func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
 		Source:     agent + "-hook",
 	}
 	switch input.HookEventName {
+	case "PreInvocation":
+		event.State, event.Summary = ipc.StateRunning, "Running"
 	case "SessionStart":
 		event.State, event.Summary = ipc.StateIdle, "Ready"
 	case "UserPromptSubmit":
@@ -91,7 +100,11 @@ func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
 	case "PostToolUse", "PostToolUseFailure":
 		event.State, event.Summary, event.Tool = ipc.StateRunning, "Running", input.ToolName
 	case "Stop":
-		event.State, event.Summary = ipc.StateIdle, "Turn complete"
+		if agent == "agy" && (input.Error != "" || input.TerminationReason == "error") {
+			event.State, event.Summary = ipc.StateFailed, "Turn failed"
+		} else {
+			event.State, event.Summary = ipc.StateIdle, "Turn complete"
+		}
 	case "StopFailure":
 		event.State, event.Summary = ipc.StateFailed, "Turn failed"
 	case "SessionEnd":
@@ -113,19 +126,40 @@ func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
 	return event, true
 }
 
-func relayHook(agent string, input io.Reader, client *http.Client) {
-	if os.Getenv("AGENTWATCH_WRAPPED") == "1" || (agent != "codex" && agent != "claude") {
-		return
+func relayHook(agent, eventName string, input io.Reader, client *http.Client) string {
+	response := hookResponse(agent, eventName)
+	if os.Getenv("AGENTWATCH_WRAPPED") == "1" || (agent != "codex" && agent != "claude" && agent != "agy") {
+		return response
 	}
 	var payload hookInput
 	if json.NewDecoder(io.LimitReader(input, 1<<20)).Decode(&payload) != nil {
-		return
+		return response
+	}
+	if payload.SessionID == "" {
+		payload.SessionID = payload.ConversationID
+	}
+	if payload.HookEventName == "" {
+		payload.HookEventName = eventName
+	}
+	if payload.ToolName == "" {
+		payload.ToolName = payload.ToolCall.Name
 	}
 	if event, ok := hookEvent(agent, payload); ok {
 		// Hook processes are short-lived. A zero PID prevents the daemon from
 		// treating their sessions as orphaned as soon as the hook exits.
 		postEvent(client, event, 0)
 	}
+	return response
+}
+
+func hookResponse(agent, eventName string) string {
+	if agent != "agy" {
+		return ""
+	}
+	if eventName == "Stop" {
+		return `{"decision":"stop"}`
+	}
+	return `{}`
 }
 
 var hookEvents = map[string][]string{
@@ -235,9 +269,93 @@ func hasAgentWatchHook(groups []any, agent, executable string) bool {
 	return false
 }
 
+func agyPluginFiles(executable string) ([]byte, []byte, error) {
+	handler := func(event string) map[string]any {
+		return map[string]any{
+			"type":    "command",
+			"command": shellQuote(executable) + " hook agy " + event,
+			"timeout": 1,
+		}
+	}
+	manifest := map[string]any{
+		"$schema":     "https://antigravity.google/schemas/v1/plugin.json",
+		"name":        "agentwatch",
+		"description": "Observation-only AgentWatch lifecycle integration",
+	}
+	hooks := map[string]any{
+		"agentwatch": map[string]any{
+			"PreInvocation": []any{handler("PreInvocation")},
+			"PostToolUse": []any{map[string]any{
+				"matcher": "*",
+				"hooks":   []any{handler("PostToolUse")},
+			}},
+			"Stop": []any{handler("Stop")},
+		},
+	}
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	hooksJSON, err := json.MarshalIndent(hooks, "", "  ")
+	return append(manifestJSON, '\n'), append(hooksJSON, '\n'), err
+}
+
+func sameJSONFile(path string, expected []byte) bool {
+	actual, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var actualValue, expectedValue any
+	return json.Unmarshal(actual, &actualValue) == nil &&
+		json.Unmarshal(expected, &expectedValue) == nil &&
+		reflect.DeepEqual(actualValue, expectedValue)
+}
+
+func installAgyHooks(executable, home string) error {
+	agy, err := exec.LookPath("agy")
+	if err != nil {
+		return errors.New("agy is not installed")
+	}
+	manifest, hooks, err := agyPluginFiles(executable)
+	if err != nil {
+		return err
+	}
+	targets := []string{
+		filepath.Join(home, ".gemini", "config", "plugins", "agentwatch"),
+		filepath.Join(home, ".gemini", "antigravity-cli", "plugins", "agentwatch"),
+	}
+	for _, target := range targets {
+		if _, err := os.Stat(target); err != nil {
+			continue
+		}
+		if sameJSONFile(filepath.Join(target, "plugin.json"), manifest) && sameJSONFile(filepath.Join(target, "hooks.json"), hooks) {
+			return nil
+		}
+		return fmt.Errorf("refusing to replace existing plugin at %s", target)
+	}
+	temp, err := os.MkdirTemp("", "agentwatch-agy-plugin-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	if err := os.WriteFile(filepath.Join(temp, "plugin.json"), manifest, 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(temp, "hooks.json"), hooks, 0600); err != nil {
+		return err
+	}
+	for _, action := range []string{"validate", "install"} {
+		output, err := exec.Command(agy, "plugin", action, temp).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("agy plugin %s: %s", action, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
+}
+
 func runHooksCommand(args []string) error {
-	if len(args) != 2 || args[0] != "install" || (args[1] != "codex" && args[1] != "claude" && args[1] != "all") {
-		return errors.New("usage: aw hooks install <codex|claude|all>")
+	if len(args) != 2 || args[0] != "install" || (args[1] != "codex" && args[1] != "claude" && args[1] != "agy" && args[1] != "all") {
+		return errors.New("usage: aw hooks install <codex|claude|agy|all>")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -254,8 +372,18 @@ func runHooksCommand(args []string) error {
 	agents := []string{args[1]}
 	if args[1] == "all" {
 		agents = []string{"codex", "claude"}
+		if _, err := exec.LookPath("agy"); err == nil {
+			agents = append(agents, "agy")
+		}
 	}
 	for _, agent := range agents {
+		if agent == "agy" {
+			if err := installAgyHooks(executable, home); err != nil {
+				return fmt.Errorf("agy: %w", err)
+			}
+			fmt.Println("agy hooks installed as the isolated agentwatch plugin")
+			continue
+		}
 		path := filepath.Join(home, "."+agent, "hooks.json")
 		if agent == "claude" {
 			path = filepath.Join(home, ".claude", "settings.json")
@@ -765,12 +893,18 @@ func (pw *ParserWriter) deliverEvent(event ipc.AgentEvent) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: aw <command> [args...] | aw hooks install <codex|claude|all>")
+		fmt.Println("Usage: aw <command> [args...] | aw hooks install <codex|claude|agy|all>")
 		os.Exit(1)
 	}
 	if os.Args[1] == "hook" {
-		if len(os.Args) == 3 {
-			relayHook(os.Args[2], os.Stdin, &http.Client{Timeout: 300 * time.Millisecond})
+		if len(os.Args) == 3 || len(os.Args) == 4 {
+			eventName := ""
+			if len(os.Args) == 4 {
+				eventName = os.Args[3]
+			}
+			if response := relayHook(os.Args[2], eventName, os.Stdin, &http.Client{Timeout: 300 * time.Millisecond}); response != "" {
+				fmt.Println(response)
+			}
 		}
 		return
 	}
@@ -795,7 +929,7 @@ func main() {
 
 	cmd := exec.Command(agentName, args...)
 	wrappedAgent := strings.ToLower(filepath.Base(agentName))
-	if wrappedAgent == "codex" || wrappedAgent == "claude" {
+	if wrappedAgent == "codex" || wrappedAgent == "claude" || wrappedAgent == "agy" {
 		cmd.Env = append(os.Environ(), "AGENTWATCH_WRAPPED=1")
 	}
 

@@ -40,6 +40,50 @@ func TestHookEventMapping(t *testing.T) {
 	}
 }
 
+func TestAgyHookMappingAndResponses(t *testing.T) {
+	tests := []struct {
+		event    string
+		input    hookInput
+		state    ipc.AgentState
+		response string
+	}{
+		{event: "PreInvocation", input: hookInput{SessionID: "one", HookEventName: "PreInvocation"}, state: ipc.StateRunning, response: `{}`},
+		{event: "PostToolUse", input: hookInput{SessionID: "one", HookEventName: "PostToolUse", ToolName: "run_command"}, state: ipc.StateRunning, response: `{}`},
+		{event: "Stop", input: hookInput{SessionID: "one", HookEventName: "Stop"}, state: ipc.StateIdle, response: `{"decision":"stop"}`},
+		{event: "Stop", input: hookInput{SessionID: "one", HookEventName: "Stop", TerminationReason: "error"}, state: ipc.StateFailed, response: `{"decision":"stop"}`},
+	}
+	for _, test := range tests {
+		event, ok := hookEvent("agy", test.input)
+		if !ok || event.State != test.state {
+			t.Fatalf("%s = (%q, %v), want %q", test.event, event.State, ok, test.state)
+		}
+		if got := hookResponse("agy", test.event); got != test.response {
+			t.Fatalf("%s response = %q, want %q", test.event, got, test.response)
+		}
+	}
+}
+
+func TestAgyPluginIsObservationOnly(t *testing.T) {
+	manifest, hooks, err := agyPluginFiles("/tmp/aw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(manifest) || !json.Valid(hooks) {
+		t.Fatal("invalid plugin JSON")
+	}
+	for _, event := range []string{"PreInvocation", "PostToolUse", "Stop"} {
+		if !bytes.Contains(hooks, []byte(event)) {
+			t.Fatalf("missing %s", event)
+		}
+	}
+	if bytes.Contains(hooks, []byte("PreToolUse")) {
+		t.Fatal("agy plugin must never participate in tool permission decisions")
+	}
+	if !bytes.Contains(hooks, []byte("'/tmp/aw' hook agy")) {
+		t.Fatal("missing AgentWatch relay command")
+	}
+}
+
 func TestInstallHooksPreservesSettingsAndIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	original := []byte("{\n  \"permissions\": {\"allow\": [\"Read\"]},\n  \"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"existing\"}]}]}\n}\n")

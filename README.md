@@ -14,7 +14,7 @@ AgentWatch is a lightweight, real-time activity tracker for CLI-based AI coding 
 - Distinguishes starting, running, tool execution, permission, input, completion, failure, and orphaned states.
 - Shows permission and input attention indicators in the notch.
 - Recognizes Codex's terminal-title activity signal and interactive composer.
-- Tracks ordinary Codex and Claude launches through lifecycle hooks.
+- Tracks ordinary Codex, Claude, and Antigravity launches through lifecycle hooks.
 - Preserves interactive terminal behavior through a pseudo-terminal (PTY).
 - Runs locally without sending prompts or terminal output to an external AgentWatch service.
 
@@ -94,33 +94,31 @@ Install only one integration if preferred:
 ```bash
 aw hooks install codex
 aw hooks install claude
+aw hooks install agy
 ```
 
-The command changes only these hook sections:
+The command installs these integrations:
 
 - Codex: `~/.codex/hooks.json`
 - Claude: `~/.claude/settings.json`
+- Antigravity: an isolated `agentwatch` plugin through `agy plugin install`
 
-Existing settings are preserved. Before changing an existing file, AgentWatch
-creates an adjacent `.agentwatch.bak` once. The hooks observe lifecycle events,
-never return allow/deny decisions, and quietly exit if AgentWatch is not running.
+Existing Codex and Claude settings are preserved. Before changing one of their
+existing files, AgentWatch creates an adjacent `.agentwatch.bak` once. The
+Antigravity plugin does not install `PreToolUse`, so it cannot allow, deny, or
+change tool permissions. All hooks quietly continue if AgentWatch is not running.
 
-Start a new Codex or Claude session after installing. If Codex asks you to
-review the new commands, open `/hooks` and trust the AgentWatch entries.
+Start a new agent session after installing. If Codex asks you to review the new
+commands, open `/hooks` and trust the AgentWatch entries.
 
 ## Use AgentWatch with an agent
 
-Keep AgentWatch running and launch Codex or Claude normally—no wrapper:
+Keep AgentWatch running and launch agents normally—no wrapper:
 
 ```bash
 codex
 claude
-```
-
-Antigravity does not expose the same hooks yet, so continue using the wrapper:
-
-```bash
-aw agy
+agy
 ```
 
 Arguments are passed directly to each agent:
@@ -128,10 +126,11 @@ Arguments are passed directly to each agent:
 ```bash
 codex --model <model>
 claude --continue
+agy --continue
 ```
 
-The PTY wrapper remains available as a fallback. Wrapped Codex and Claude
-sessions automatically suppress their hook events to avoid duplicate entries.
+The PTY wrapper remains available as a fallback. Wrapped sessions automatically
+suppress their hook events to avoid duplicate entries.
 
 Interactive Codex sessions automatically use inline display mode so AgentWatch can reliably detect when Codex is ready for the next prompt.
 
@@ -203,7 +202,7 @@ Make sure:
 
 1. The eye icon is visible in the menu bar.
 2. Hooks were installed with `aw hooks install all` and the agent was restarted.
-3. Codex or Claude was launched directly; Antigravity was launched with `aw agy`.
+3. Codex, Claude, or Antigravity was launched directly after hook installation.
 4. Port `127.0.0.1:8765` is not already occupied by another program.
 
 Check the daemon snapshot:
@@ -232,14 +231,14 @@ The terminal application may independently retain visible content in its scrollb
 
 ```mermaid
 graph TD
-    A["Codex and Claude hooks"] -- "structured lifecycle events" --> B["Local Daemon (agentwatchd)"]
+    A["Codex, Claude, and Antigravity hooks"] -- "structured lifecycle events" --> B["Local Daemon (agentwatchd)"]
     E["CLI Wrapper (aw fallback)"] -- "state events" --> B
     C["macOS App (AgentWatch)"] -- "local status stream" --> B
     C -- "renders" --> D["Notch and Menu Bar"]
 ```
 
-1. **Hooks:** Codex and Claude invoke the local `aw hook` relay, which emits normalized state metadata and always returns without making permission decisions.
-2. **CLI wrapper (`aw`):** Provides PTY-based tracking for agents without supported hooks and remains available as a fallback.
+1. **Hooks:** Codex, Claude, and Antigravity invoke the local `aw hook` relay, which emits normalized state metadata without participating in tool permission decisions.
+2. **CLI wrapper (`aw`):** Provides PTY-based tracking as a fallback.
 3. **Daemon (`agentwatchd`):** Coordinates sessions on `127.0.0.1:8765` and publishes snapshots and server-sent events.
 4. **macOS app (`AgentWatch`):** Starts the bundled daemon, consumes its local state stream, and renders the menu-bar and notch interfaces.
 
