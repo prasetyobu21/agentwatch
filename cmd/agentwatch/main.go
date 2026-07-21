@@ -265,13 +265,9 @@ func (pw *ParserWriter) isCurrentlyIdleLocked() bool {
 
 	if pw.isCodex() {
 		if pw.codexTitleSeen {
-			if !pw.codexTitleBusy {
-				return true
-			}
-			// A terminal-title update can be dropped while Codex redraws. The
-			// currently visible composer/footer is newer evidence than a stale
-			// spinner title, so let it end the running state.
-			return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
+			// The title is Codex's live state. The screen can retain an old
+			// composer/footer while a tool milestone is still running.
+			return !pw.codexTitleBusy
 		}
 		return codexIsIdle(lastLines, normalizedStr, isTypingGracePeriod)
 	}

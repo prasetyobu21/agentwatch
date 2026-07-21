@@ -106,7 +106,7 @@ func TestCodexTerminalTitleControlsState(t *testing.T) {
 	}
 }
 
-func TestCodexReadyScreenOverridesStaleBusyTitle(t *testing.T) {
+func TestCodexBusyTitleOverridesStaleReadyScreen(t *testing.T) {
 	m := terminal.New(100, 10)
 	output := "\x1b]0;⠴ agentwatch\x07\n› Ask Codex anything\n? for shortcuts"
 	if err := m.Write([]byte(output)); err != nil {
@@ -114,8 +114,8 @@ func TestCodexReadyScreenOverridesStaleBusyTitle(t *testing.T) {
 	}
 	pw := &ParserWriter{AgentName: "codex", terminal: m, outputBuffer: []byte(output)}
 	pw.updateCodexTitleLocked()
-	if got := pw.classifyLocked(); got != ipc.StateIdle {
-		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateIdle)
+	if got := pw.classifyLocked(); got != ipc.StateRunning {
+		t.Fatalf("classifyLocked() = %q, want %q", got, ipc.StateRunning)
 	}
 }
 
