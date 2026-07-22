@@ -113,7 +113,9 @@ func hookEvent(agent string, input hookInput) (ipc.AgentEvent, bool) {
 		switch input.NotificationType {
 		case "permission_prompt":
 			event.State, event.Summary = ipc.StatePermissionRequired, "Permission required"
-		case "idle_prompt", "agent_needs_input":
+		case "idle_prompt":
+			event.State, event.Summary = ipc.StateIdle, "Turn complete"
+		case "agent_needs_input":
 			event.State, event.Summary = ipc.StateInputRequired, "Input required"
 		case "agent_completed":
 			event.State, event.Summary = ipc.StateIdle, "Turn complete"

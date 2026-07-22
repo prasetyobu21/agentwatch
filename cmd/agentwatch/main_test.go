@@ -23,6 +23,8 @@ func TestHookEventMapping(t *testing.T) {
 		{name: "tool", input: hookInput{SessionID: "one", HookEventName: "PreToolUse", ToolName: "Bash"}, state: ipc.StateExecutingTool, ok: true},
 		{name: "question", input: hookInput{SessionID: "one", HookEventName: "PreToolUse", ToolName: "AskUserQuestion"}, state: ipc.StateInputRequired, ok: true},
 		{name: "permission", input: hookInput{SessionID: "one", HookEventName: "PermissionRequest"}, state: ipc.StatePermissionRequired, ok: true},
+		{name: "idle notification", input: hookInput{SessionID: "one", HookEventName: "Notification", NotificationType: "idle_prompt"}, state: ipc.StateIdle, ok: true},
+		{name: "input notification", input: hookInput{SessionID: "one", HookEventName: "Notification", NotificationType: "agent_needs_input"}, state: ipc.StateInputRequired, ok: true},
 		{name: "stop", input: hookInput{SessionID: "one", HookEventName: "Stop"}, state: ipc.StateIdle, ok: true},
 		{name: "unknown", input: hookInput{SessionID: "one", HookEventName: "Other"}},
 		{name: "missing session", input: hookInput{HookEventName: "Stop"}},
