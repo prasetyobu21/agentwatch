@@ -382,7 +382,7 @@ struct NotchView: View {
         } else if activeCount > 0 {
             return 60
         } else if showingDone {
-            return 130
+            return 150
         } else {
             return 0
         }
