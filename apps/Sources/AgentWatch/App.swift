@@ -379,10 +379,10 @@ struct NotchView: View {
             // Input requests use a shorter label and do not need the extra
             // trailing space reserved for permission text.
             return 150
-        } else if activeCount > 0 {
-            return 60
         } else if showingDone {
             return 150
+        } else if activeCount > 0 {
+            return 60
         } else {
             return 0
         }
